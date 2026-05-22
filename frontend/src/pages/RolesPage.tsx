@@ -1,6 +1,18 @@
 import { useState } from 'react'
 import type { Role } from '../types'
 import { createRole, updateRole, deleteRole } from '../api'
+import { IconEdit, IconDelete } from '../components/Icons'
+
+const ROLE_BG = [
+  '#eff6ff',
+  '#f0fdf4',
+  '#fefce8',
+  '#fff7ed',
+  '#fdf4ff',
+  '#f0fdfa',
+  '#fff1f2',
+  '#f5f3ff',
+]
 
 interface Props {
   roles: Role[]
@@ -87,12 +99,14 @@ export default function RolesPage({ roles, onRefresh }: Props) {
           </thead>
           <tbody>
             {roles.map((r, i) => (
-              <tr key={r.id} className={i % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'}>
+              <tr key={r.id} style={{ backgroundColor: ROLE_BG[i % ROLE_BG.length] }}>
                 <td className="px-4 py-3 font-medium text-gray-800">{r.name}</td>
                 <td className="px-4 py-3 text-right text-gray-600">{r.multiplier}×</td>
                 <td className="px-4 py-3 text-right">
-                  <button onClick={() => startEdit(r)} className="text-indigo-600 hover:underline mr-3">Edit</button>
-                  <button onClick={() => handleDelete(r.id)} className="text-red-500 hover:underline">Delete</button>
+                  <div className="flex items-center justify-end gap-1">
+                    <button onClick={() => startEdit(r)} title="Edit" className="p-1.5 text-indigo-500 hover:text-indigo-700 hover:bg-indigo-50 rounded-md transition-colors"><IconEdit /></button>
+                    <button onClick={() => handleDelete(r.id)} title="Delete" className="p-1.5 text-red-400 hover:text-red-600 hover:bg-red-50 rounded-md transition-colors"><IconDelete /></button>
+                  </div>
                 </td>
               </tr>
             ))}

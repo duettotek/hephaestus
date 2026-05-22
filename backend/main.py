@@ -20,6 +20,11 @@ with engine.connect() as _conn:
             _conn.commit()
         except Exception:
             pass  # column already exists
+    try:
+        _conn.execute(text("ALTER TABLE projects ADD COLUMN pattern_box_group INTEGER"))
+        _conn.commit()
+    except Exception:
+        pass  # column already exists
 
 app = FastAPI(title="Capacity Planner")
 
@@ -46,16 +51,12 @@ class RoleOut(RoleCreate):
 class PersonCreate(BaseModel):
     name: str
     role_id: Optional[int] = None
-    sprint_capacity: int = 10
-    pto_days: int = 0
 
 class PersonOut(BaseModel):
     id: int
     name: str
     role_id: Optional[int]
     role_name: Optional[str]
-    sprint_capacity: int
-    pto_days: int
     sort_order: int = 0
     class Config:
         from_attributes = True
@@ -67,6 +68,7 @@ class ProjectCreate(BaseModel):
     name: str
     demand_days: int = 0
     color: str = "#6366f1"
+    pattern_box_group: Optional[int] = None
 
 class ProjectOut(ProjectCreate):
     id: int
@@ -144,7 +146,6 @@ def list_people(db: Session = Depends(get_db)):
         PersonOut(
             id=p.id, name=p.name, role_id=p.role_id,
             role_name=p.role.name if p.role else None,
-            sprint_capacity=p.sprint_capacity, pto_days=p.pto_days,
             sort_order=p.sort_order,
         )
         for p in people
@@ -166,7 +167,6 @@ def create_person(person: PersonCreate, db: Session = Depends(get_db)):
     return PersonOut(
         id=db_person.id, name=db_person.name, role_id=db_person.role_id,
         role_name=db_person.role.name if db_person.role else None,
-        sprint_capacity=db_person.sprint_capacity, pto_days=db_person.pto_days,
         sort_order=db_person.sort_order,
     )
 
@@ -182,7 +182,6 @@ def update_person(person_id: int, person: PersonCreate, db: Session = Depends(ge
     return PersonOut(
         id=db_person.id, name=db_person.name, role_id=db_person.role_id,
         role_name=db_person.role.name if db_person.role else None,
-        sprint_capacity=db_person.sprint_capacity, pto_days=db_person.pto_days,
         sort_order=db_person.sort_order,
     )
 
@@ -282,18 +281,7 @@ def delete_assignment(assignment_id: int, db: Session = Depends(get_db)):
     return {"ok": True}
 
 
-# ── Stats (formula-derived fields) ────────────────────────────────────────────
-#
-# Mirrors the Excel logic (all values in days):
-#   People sheet:
-#     Availability = Sprint capacity − PTO days          (F = D − E)
-#     Allocated    = SUBTOTAL(person column in Projects)  (G = count of assigned days)
-#     Remaining    = Availability − Allocated             (H = F − G)
-#   Projects sheet:
-#     Allocated per person = count of assignment days
-#     Total allocated      = SUBTOTAL(person cols) = sum across all people
-#     Remaining demand     = Demand − Allocated
-#   Role multiplier applied to weighted allocation.
+# ── Stats ─────────────────────────────────────────────────────────────────────
 
 @app.get("/api/stats")
 def get_stats(date_from: date, date_to: date, db: Session = Depends(get_db)):
@@ -323,31 +311,16 @@ def get_stats(date_from: date, date_to: date, db: Session = Depends(get_db)):
     for p in people:
         role = role_map.get(p.role_id) if p.role_id else None
         multiplier = role.multiplier if role else 1.0
-
-        # Excel F: Availability = Sprint capacity − PTO days
-        availability = p.sprint_capacity - p.pto_days
-
-        # Excel G: Allocated = SUBTOTAL(person column) = count of assigned days
         allocated = allocated_by_person.get(p.id, 0)
-
-        # Weighted by role multiplier
         allocated_weighted = round(allocated * multiplier, 1)
-
-        # Excel H: Remaining = Availability − Allocated
-        remaining = availability - allocated
 
         people_stats.append({
             "person_id": p.id,
             "name": p.name,
             "role_name": role.name if role else None,
             "role_multiplier": multiplier,
-            "sprint_capacity": p.sprint_capacity,   # D: Sprint capacity (days)
-            "pto_days": p.pto_days,                  # E: PTO days
-            "availability": availability,            # F: Availability = D − E
-            "allocated": allocated,                  # G: Allocated = SUBTOTAL
-            "allocated_weighted": allocated_weighted,# G × role multiplier
-            "remaining": remaining,                  # H: Remaining = F − G
-            "utilization_pct": round(allocated / availability * 100, 1) if availability > 0 else 0,
+            "allocated": allocated,
+            "allocated_weighted": allocated_weighted,
             "by_project": {pid: d for pid, d in project_days_by_person.get(p.id, {}).items()},
         })
 

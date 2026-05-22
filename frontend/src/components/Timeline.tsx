@@ -2,8 +2,8 @@ import { useEffect, useState, useCallback, useRef } from 'react'
 import type { Person, Project } from '../types'
 import { getAssignments, bulkAssign, bulkDelete } from '../api'
 import {
-  isoDate, daysInRange, isWeekend,
-  formatDayHeader, shortDayName, monthLabel, getSprintAnchor,
+  isoDate, daysInRange, isWeekend, italianHolidays,
+  formatDayHeader, shortDayName, monthLabel, getSprintAnchor, projectInitials,
 } from '../utils/dates'
 
 const CELL_W = 28
@@ -11,7 +11,16 @@ const CELL_H = 32
 const NAME_W = 180
 const SPRINT_DAYS = 14
 
-type ViewMode = 'full' | 'quarter' | 'sprint'
+type ViewMode = 'full' | 'semester' | 'quarter' | 'month' | 'sprint'
+
+const SEMESTERS = [
+  { label: 'S1', startMonth: 0, endMonth: 5 },   // Jan – Jun
+  { label: 'S2', startMonth: 6, endMonth: 11 },  // Jul – Dec
+]
+
+function currentSemesterIndex(): number {
+  return new Date().getMonth() < 6 ? 0 : 1
+}
 
 // User-defined fiscal quarters (name → [startMonth, endMonth] 0-indexed)
 const QUARTERS = [
@@ -67,13 +76,16 @@ export default function Timeline({ people, projects, rangeStart, rangeEnd }: Pro
   const [activeProject, setActiveProject] = useState<number | null>(projects[0]?.id ?? null)
   const [loading, setLoading] = useState(true)
   const [viewMode, setViewMode] = useState<ViewMode>('full')
+  const [semesterIndex, setSemesterIndex] = useState(currentSemesterIndex)
   const [quarterIndex, setQuarterIndex] = useState(currentQuarterIndex)
+  const [monthIndex, setMonthIndex] = useState(() => new Date().getMonth())
   const [sprintIndex, setSprintIndex] = useState(0)
 
   const scrollRef = useRef<HTMLDivElement>(null)
   const projectMap = new Map(projects.map(p => [p.id, p]))
   const todayStr = isoDate(new Date())
   const year = rangeStart.getFullYear()
+  const holidays = italianHolidays(year)
 
   const fetchAssignments = useCallback(async () => {
     setLoading(true)
@@ -92,6 +104,21 @@ export default function Timeline({ people, projects, rangeStart, rangeEnd }: Pro
 
   // ── Day ranges ──────────────────────────────────────────────────────────────
   const allDays = daysInRange(rangeStart, rangeEnd)
+
+  // Month days: clipped to rangeStart/rangeEnd
+  function monthDays(mi: number): Date[] {
+    const from = new Date(Math.max(new Date(year, mi, 1).getTime(), rangeStart.getTime()))
+    const to = new Date(Math.min(new Date(year, mi + 1, 0).getTime(), rangeEnd.getTime()))
+    return daysInRange(from, to)
+  }
+
+  // Semester days: clipped to rangeStart/rangeEnd
+  function semesterDays(si: number): Date[] {
+    const s = SEMESTERS[si]
+    const from = new Date(Math.max(new Date(year, s.startMonth, 1).getTime(), rangeStart.getTime()))
+    const to = new Date(Math.min(new Date(year, s.endMonth + 1, 0).getTime(), rangeEnd.getTime()))
+    return daysInRange(from, to)
+  }
 
   // Quarter days: clipped to rangeStart/rangeEnd
   function quarterDays(qi: number): Date[] {
@@ -126,8 +153,10 @@ export default function Timeline({ people, projects, rangeStart, rangeEnd }: Pro
 
   // ── Visible days ────────────────────────────────────────────────────────────
   const days =
-    viewMode === 'sprint'  ? allSprintDays.slice(clampedSprint * SPRINT_DAYS, (clampedSprint + 1) * SPRINT_DAYS) :
-    viewMode === 'quarter' ? quarterDays(quarterIndex) :
+    viewMode === 'sprint'   ? allSprintDays.slice(clampedSprint * SPRINT_DAYS, (clampedSprint + 1) * SPRINT_DAYS) :
+    viewMode === 'quarter'  ? quarterDays(quarterIndex) :
+    viewMode === 'semester' ? semesterDays(semesterIndex) :
+    viewMode === 'month'    ? monthDays(monthIndex) :
     allDays
 
   // Month header groups
@@ -181,8 +210,10 @@ export default function Timeline({ people, projects, rangeStart, rangeEnd }: Pro
   // ── Toolbar helpers ─────────────────────────────────────────────────────────
   function activateView(mode: ViewMode) {
     setViewMode(mode)
-    if (mode === 'sprint') setSprintIndex(todaySprintIndex())
-    if (mode === 'quarter') setQuarterIndex(currentQuarterIndex())
+    if (mode === 'semester') setSemesterIndex(currentSemesterIndex())
+    if (mode === 'quarter')  setQuarterIndex(currentQuarterIndex())
+    if (mode === 'month')    setMonthIndex(new Date().getMonth())
+    if (mode === 'sprint')   setSprintIndex(todaySprintIndex())
   }
 
   const tabCls = (active: boolean) =>
@@ -224,10 +255,23 @@ export default function Timeline({ people, projects, rangeStart, rangeEnd }: Pro
         {/* View toggle */}
         <div className="flex items-center gap-2">
           <div className="flex gap-0.5 bg-gray-100 rounded-lg p-0.5">
-            <button onClick={() => activateView('full')}    className={tabCls(viewMode === 'full')}>Full range</button>
-            <button onClick={() => activateView('quarter')} className={tabCls(viewMode === 'quarter')}>Quarter</button>
-            <button onClick={() => activateView('sprint')}  className={tabCls(viewMode === 'sprint')}>Sprint</button>
+            <button onClick={() => activateView('full')}     className={tabCls(viewMode === 'full')}>Full range</button>
+            <button onClick={() => activateView('semester')} className={tabCls(viewMode === 'semester')}>Semester</button>
+            <button onClick={() => activateView('quarter')}  className={tabCls(viewMode === 'quarter')}>Quarter</button>
+            <button onClick={() => activateView('month')}    className={tabCls(viewMode === 'month')}>Month</button>
+            <button onClick={() => activateView('sprint')}   className={tabCls(viewMode === 'sprint')}>Sprint</button>
           </div>
+
+          {/* Semester sub-selector */}
+          {viewMode === 'semester' && (
+            <div className="flex gap-0.5 bg-gray-100 rounded-lg p-0.5">
+              {SEMESTERS.map((s, i) => (
+                <button key={s.label} onClick={() => setSemesterIndex(i)} className={tabCls(semesterIndex === i)}>
+                  {s.label}
+                </button>
+              ))}
+            </div>
+          )}
 
           {/* Quarter sub-selector */}
           {viewMode === 'quarter' && (
@@ -241,6 +285,25 @@ export default function Timeline({ people, projects, rangeStart, rangeEnd }: Pro
                   {q.label}
                 </button>
               ))}
+            </div>
+          )}
+
+          {/* Month navigator */}
+          {viewMode === 'month' && (
+            <div className="flex items-center gap-1">
+              <button
+                onClick={() => setMonthIndex(i => Math.max(0, i - 1))}
+                disabled={monthIndex === 0}
+                className="w-6 h-6 flex items-center justify-center rounded hover:bg-gray-100 disabled:opacity-30 text-gray-600"
+              >‹</button>
+              <span className="text-xs font-medium text-gray-700 min-w-[90px] text-center">
+                {new Date(year, monthIndex, 1).toLocaleString('default', { month: 'long' })}
+              </span>
+              <button
+                onClick={() => setMonthIndex(i => Math.min(11, i + 1))}
+                disabled={monthIndex === 11}
+                className="w-6 h-6 flex items-center justify-center rounded hover:bg-gray-100 disabled:opacity-30 text-gray-600"
+              >›</button>
             </div>
           )}
 
@@ -294,27 +357,31 @@ export default function Timeline({ people, projects, rangeStart, rangeEnd }: Pro
                 Person
               </th>
               {days.map(d => {
+                const dateStr = isoDate(d)
                 const wknd = isWeekend(d)
-                const isToday = isoDate(d) === todayStr
+                const isToday = dateStr === todayStr
+                const holiday = !wknd && holidays.has(dateStr)
                 const qStart = isQuarterStart(d)
                 const qEnd = isQuarterEnd(d)
                 return (
                   <th
-                    key={isoDate(d)}
+                    key={dateStr}
                     style={{
                       width: CELL_W, minWidth: CELL_W,
                       borderLeft:  isToday ? undefined : qStart ? '2px solid #7c3aed' : undefined,
                       borderRight: qEnd ? '2px solid #7c3aed' : undefined,
                     }}
                     className={`border-b border-r text-center ${
-                      isToday ? 'border-l-2 border-l-red-400 bg-red-50'
-                               : `border-gray-200 ${wknd ? 'bg-gray-100' : 'bg-white'}`
+                      isToday   ? 'border-l-2 border-l-blue-400 bg-blue-50'
+                      : holiday ? 'border-gray-200 bg-red-100'
+                      : wknd    ? 'border-gray-200 bg-gray-100'
+                                : 'border-gray-200 bg-white'
                     }`}
                   >
-                    <div className={`text-[9px] leading-none ${isToday ? 'text-red-400 font-semibold' : 'text-gray-400'}`}>
+                    <div className={`text-[9px] leading-none ${isToday ? 'text-blue-400 font-semibold' : holiday ? 'text-red-400' : 'text-gray-400'}`}>
                       {shortDayName(d)}
                     </div>
-                    <div className={`text-[10px] font-bold leading-none mt-px ${isToday ? 'text-red-500' : 'text-gray-600'}`}>
+                    <div className={`text-[10px] font-bold leading-none mt-px ${isToday ? 'text-blue-500' : holiday ? 'text-red-500' : 'text-gray-600'}`}>
                       {formatDayHeader(d)}
                     </div>
                   </th>
@@ -330,14 +397,12 @@ export default function Timeline({ people, projects, rangeStart, rangeEnd }: Pro
                   className="sticky left-0 z-10 border-b border-r border-gray-200 px-3 py-0 bg-inherit"
                 >
                   <div className="text-xs font-medium text-gray-800 truncate">{person.name}</div>
-                  {person.role_name && (
-                    <div className="text-[10px] text-gray-400 truncate">{person.role_name}</div>
-                  )}
                 </td>
                 {days.map(d => {
                   const dateStr = isoDate(d)
                   const wknd = isWeekend(d)
                   const isToday = dateStr === todayStr
+                  const holiday = !wknd && holidays.has(dateStr)
                   const qStart = isQuarterStart(d)
                   const qEnd = isQuarterEnd(d)
                   const projId = previewMap.get(`${person.id}:${dateStr}`)
@@ -348,21 +413,27 @@ export default function Timeline({ people, projects, rangeStart, rangeEnd }: Pro
                       key={dateStr}
                       style={{
                         width: CELL_W, minWidth: CELL_W, height: CELL_H,
-                        backgroundColor: proj ? proj.color : undefined,
-                        cursor: (wknd && activeProject !== null) ? 'not-allowed' : (activeProject !== null ? 'crosshair' : 'cell'),
+                        backgroundColor: proj ? proj.color : holiday ? '#fef2f2' : undefined,
+                        cursor: ((wknd || holiday) && activeProject !== null) ? 'not-allowed' : (activeProject !== null ? 'crosshair' : 'cell'),
                         opacity: proj ? 0.85 : 1,
                         borderLeft:  isToday ? undefined : qStart ? '2px solid #7c3aed' : undefined,
                         borderRight: qEnd ? '2px solid #7c3aed' : undefined,
                       }}
                       className={`border-b border-r border-gray-100 ${
                         isToday
-                          ? 'border-l-2 border-l-red-400' + (!proj ? ' bg-red-50/40' : '')
+                          ? 'border-l-2 border-l-blue-400' + (!proj ? ' bg-blue-50/40' : '')
                           : (!proj && wknd ? 'bg-gray-100' : '')
                       }`}
-                      onMouseDown={(wknd && activeProject !== null) ? undefined : () => onCellMouseDown(person.id, dateStr)}
-                      onMouseEnter={(wknd && activeProject !== null) ? undefined : () => onCellMouseEnter(person.id, dateStr)}
-                      title={proj ? `${person.name} – ${proj.name} – ${dateStr}` : dateStr}
-                    />
+                      onMouseDown={((wknd || holiday) && activeProject !== null) ? undefined : () => onCellMouseDown(person.id, dateStr)}
+                      onMouseEnter={((wknd || holiday) && activeProject !== null) ? undefined : () => onCellMouseEnter(person.id, dateStr)}
+                      title={proj ? `${person.name} – ${proj.name} – ${dateStr}` : holiday ? `${dateStr} – festività` : dateStr}
+                    >
+                      {proj && (
+                        <span className="flex items-center justify-center h-full text-white font-bold select-none pointer-events-none" style={{ fontSize: 8, lineHeight: 1 }}>
+                          {projectInitials(proj.name)}
+                        </span>
+                      )}
+                    </td>
                   )
                 })}
               </tr>
@@ -376,11 +447,17 @@ export default function Timeline({ people, projects, rangeStart, rangeEnd }: Pro
         <span>Click & drag to assign days</span>
         <span>·</span>
         <span>Select "Erase" to remove</span>
-        {viewMode === 'sprint' && (
-          <><span>·</span><span>{days.filter(d => !isWeekend(d)).length} working days in sprint</span></>
+        {viewMode === 'semester' && (
+          <><span>·</span><span>{SEMESTERS[semesterIndex].label}: {days.length} days ({days.filter(d => !isWeekend(d)).length} working)</span></>
+        )}
+        {viewMode === 'month' && (
+          <><span>·</span><span>{new Date(year, monthIndex, 1).toLocaleString('default', { month: 'long' })}: {days.length} days ({days.filter(d => !isWeekend(d)).length} working)</span></>
         )}
         {viewMode === 'quarter' && (
           <><span>·</span><span>{QUARTERS[quarterIndex].label}: {days.length} days ({days.filter(d => !isWeekend(d)).length} working)</span></>
+        )}
+        {viewMode === 'sprint' && (
+          <><span>·</span><span>{days.filter(d => !isWeekend(d)).length} working days in sprint</span></>
         )}
       </div>
     </div>

@@ -9,8 +9,6 @@ export interface Person {
   name: string
   role_id: number | null
   role_name: string | null
-  sprint_capacity: number  // days per sprint
-  pto_days: number         // PTO/BH days this sprint
   sort_order: number
 }
 
@@ -19,6 +17,7 @@ export interface Project {
   name: string
   demand_days: number
   color: string
+  pattern_box_group: number | null
 }
 
 export interface Assignment {

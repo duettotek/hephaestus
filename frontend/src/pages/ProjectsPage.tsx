@@ -1,6 +1,8 @@
 import { useState, useRef } from 'react'
 import type { Project } from '../types'
 import { createProject, updateProject, deleteProject, reorderProjects } from '../api'
+import { projectInitials } from '../utils/dates'
+import { IconEdit, IconDelete } from '../components/Icons'
 
 interface Props {
   projects: Project[]
@@ -14,7 +16,7 @@ const PALETTE = [
 
 export default function ProjectsPage({ projects, onRefresh }: Props) {
   const [editing, setEditing] = useState<Project | null>(null)
-  const [form, setForm] = useState({ name: '', demand_days: 0, color: PALETTE[0] })
+  const [form, setForm] = useState({ name: '', demand_days: 0, color: PALETTE[0], pattern_box_group: null as number | null })
   const [adding, setAdding] = useState(false)
 
   // drag state
@@ -26,7 +28,7 @@ export default function ProjectsPage({ projects, onRefresh }: Props) {
     else await createProject(form)
     setEditing(null)
     setAdding(false)
-    setForm({ name: '', demand_days: 0, color: PALETTE[0] })
+    setForm({ name: '', demand_days: 0, color: PALETTE[0], pattern_box_group: null })
     onRefresh()
   }
 
@@ -38,13 +40,13 @@ export default function ProjectsPage({ projects, onRefresh }: Props) {
 
   function startEdit(p: Project) {
     setEditing(p)
-    setForm({ name: p.name, demand_days: p.demand_days, color: p.color })
+    setForm({ name: p.name, demand_days: p.demand_days, color: p.color, pattern_box_group: p.pattern_box_group })
     setAdding(false)
   }
 
   function startAdd() {
     setEditing(null)
-    setForm({ name: '', demand_days: 0, color: PALETTE[projects.length % PALETTE.length] })
+    setForm({ name: '', demand_days: 0, color: PALETTE[projects.length % PALETTE.length], pattern_box_group: null })
     setAdding(true)
   }
 
@@ -108,6 +110,15 @@ export default function ProjectsPage({ projects, onRefresh }: Props) {
                 onChange={e => setForm(f => ({ ...f, demand_days: Number(e.target.value) }))}
               />
             </div>
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">Pattern box group</label>
+              <input type="number" min="0"
+                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                placeholder="Optional"
+                value={form.pattern_box_group ?? ''}
+                onChange={e => setForm(f => ({ ...f, pattern_box_group: e.target.value === '' ? null : Number(e.target.value) }))}
+              />
+            </div>
           </div>
           <div className="mb-3">
             <label className="block text-xs text-gray-500 mb-2">Color</label>
@@ -142,12 +153,13 @@ export default function ProjectsPage({ projects, onRefresh }: Props) {
             <tr>
               <th className="w-8 px-2 py-3" />
               <th className="text-left px-4 py-3">Project</th>
+              <th className="text-left px-4 py-3">Pattern box group</th>
               <th className="text-right px-4 py-3">Demand (d)</th>
               <th className="px-4 py-3" />
             </tr>
           </thead>
           <tbody>
-            {projects.map((p, i) => (
+            {projects.map((p) => (
               <tr
                 key={p.id}
                 draggable
@@ -155,26 +167,31 @@ export default function ProjectsPage({ projects, onRefresh }: Props) {
                 onDragOver={e => onDragOver(e, p.id)}
                 onDrop={() => onDrop(p.id)}
                 onDragEnd={reset}
-                className={`transition-colors ${
-                  dropId === p.id
-                    ? 'bg-indigo-50 border-t-2 border-indigo-400'
-                    : i % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'
-                }`}
+                style={{ backgroundColor: dropId !== p.id ? p.color + '18' : undefined }}
+                className={`transition-colors ${dropId === p.id ? 'bg-indigo-50 border-t-2 border-indigo-400' : ''}`}
               >
                 {/* Drag handle */}
                 <td className="px-2 py-3 text-center cursor-grab text-gray-300 hover:text-gray-500 select-none">
                   ⠿
                 </td>
                 <td className="px-4 py-3">
-                  <div className="flex items-center gap-2">
-                    <span className="w-3 h-3 rounded-full flex-shrink-0" style={{ backgroundColor: p.color }} />
+                  <div className="flex items-center gap-3">
+                    <span
+                      className="w-9 h-9 rounded-full flex-shrink-0 flex items-center justify-center text-white text-xs font-bold select-none"
+                      style={{ backgroundColor: p.color }}
+                    >
+                      {projectInitials(p.name)}
+                    </span>
                     <span className="font-medium text-gray-800">{p.name}</span>
                   </div>
                 </td>
+                <td className="px-4 py-3 text-gray-500 text-sm">{p.pattern_box_group ?? <span className="text-gray-300">—</span>}</td>
                 <td className="px-4 py-3 text-right text-gray-600">{p.demand_days}d</td>
                 <td className="px-4 py-3 text-right">
-                  <button onClick={() => startEdit(p)} className="text-indigo-600 hover:underline mr-3">Edit</button>
-                  <button onClick={() => handleDelete(p.id)} className="text-red-500 hover:underline">Delete</button>
+                  <div className="flex items-center justify-end gap-1">
+                    <button onClick={() => startEdit(p)} title="Edit" className="p-1.5 text-indigo-500 hover:text-indigo-700 hover:bg-indigo-50 rounded-md transition-colors"><IconEdit /></button>
+                    <button onClick={() => handleDelete(p.id)} title="Delete" className="p-1.5 text-red-400 hover:text-red-600 hover:bg-red-50 rounded-md transition-colors"><IconDelete /></button>
+                  </div>
                 </td>
               </tr>
             ))}

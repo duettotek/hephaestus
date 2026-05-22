@@ -19,8 +19,6 @@ class Person(Base):
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, nullable=False)
     role_id = Column(Integer, ForeignKey("roles.id"), nullable=True)
-    sprint_capacity = Column(Integer, default=10)  # days per sprint
-    pto_days = Column(Integer, default=0)           # PTO/BH days this sprint
     sort_order = Column(Integer, default=0)
 
     role = relationship("Role", back_populates="people")
@@ -35,6 +33,7 @@ class Project(Base):
     demand_days = Column(Integer, default=0)
     color = Column(String, default="#6366f1")
     sort_order = Column(Integer, default=0)
+    pattern_box_group = Column(Integer, nullable=True)
 
     assignments = relationship("Assignment", back_populates="project", cascade="all, delete-orphan")
 

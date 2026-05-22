@@ -84,13 +84,13 @@ export default function App() {
           />
         )}
         {tab === 'stats' && (
-          <div className="flex-1 overflow-auto">
+          <div className="h-full overflow-auto">
             <StatsPage rangeStart={rangeStart} rangeEnd={rangeEnd} projects={projects} />
           </div>
         )}
-        {tab === 'people' && <PeoplePage people={people} roles={roles} projects={projects} rangeStart={rangeStart} rangeEnd={rangeEnd} onRefresh={loadAll} />}
-        {tab === 'projects' && <ProjectsPage projects={projects} onRefresh={loadAll} />}
-        {tab === 'roles' && <RolesPage roles={roles} onRefresh={loadAll} />}
+        {tab === 'people' && <div className="h-full overflow-auto"><PeoplePage people={people} roles={roles} onRefresh={loadAll} /></div>}
+        {tab === 'projects' && <div className="h-full overflow-auto"><ProjectsPage projects={projects} onRefresh={loadAll} /></div>}
+        {tab === 'roles' && <div className="h-full overflow-auto"><RolesPage roles={roles} onRefresh={loadAll} /></div>}
       </main>
     </div>
   )

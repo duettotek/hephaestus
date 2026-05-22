@@ -1,43 +1,41 @@
-import { useState, useEffect, useRef } from 'react'
-import type { Person, Role, Project } from '../types'
+import { useState, useRef } from 'react'
+import type { Person, Role } from '../types'
 import { createPerson, updatePerson, deletePerson, reorderPeople } from '../api'
-import { isoDate } from '../utils/dates'
+import { IconEdit, IconDelete } from '../components/Icons'
 
 interface Props {
   people: Person[]
   roles: Role[]
-  projects: Project[]
-  rangeStart: Date
-  rangeEnd: Date
   onRefresh: () => void
 }
 
-const empty = { name: '', role_id: null as number | null, sprint_capacity: 10, pto_days: 0, sort_order: 0 }
+const empty = { name: '', role_id: null as number | null, sort_order: 0 }
 
-export default function PeoplePage({ people, roles, projects, rangeStart, rangeEnd, onRefresh }: Props) {
+const ROLE_BG = [
+  '#eff6ff', // blue-50
+  '#f0fdf4', // green-50
+  '#fefce8', // yellow-50
+  '#fff7ed', // orange-50
+  '#fdf4ff', // fuchsia-50
+  '#f0fdfa', // teal-50
+  '#fff1f2', // rose-50
+  '#f5f3ff', // violet-50
+]
+
+function roleBg(roleId: number | null, roles: Role[]): string | undefined {
+  if (roleId === null) return undefined
+  const idx = roles.findIndex(r => r.id === roleId)
+  return idx >= 0 ? ROLE_BG[idx % ROLE_BG.length] : undefined
+}
+
+export default function PeoplePage({ people, roles, onRefresh }: Props) {
   const [editing, setEditing] = useState<Person | null>(null)
   const [form, setForm] = useState(empty)
   const [adding, setAdding] = useState(false)
-  const [ptoDaysMap, setPtoDaysMap] = useState<Map<number, number>>(new Map())
 
   // drag state
   const dragId = useRef<number | null>(null)
   const [dropId, setDropId] = useState<number | null>(null)
-
-  const ptoProject = projects.find(p => p.name.toLowerCase() === 'pto')
-
-  useEffect(() => {
-    if (!ptoProject) return
-    fetch(`/api/stats?date_from=${isoDate(rangeStart)}&date_to=${isoDate(rangeEnd)}`)
-      .then(r => r.json())
-      .then((data: { people: { person_id: number; by_project: Record<number, number> }[] }) => {
-        const map = new Map<number, number>()
-        data.people.forEach(ps => {
-          map.set(ps.person_id, ps.by_project[ptoProject!.id] ?? 0)
-        })
-        setPtoDaysMap(map)
-      })
-  }, [ptoProject?.id, rangeStart, rangeEnd])
 
   async function handleSave() {
     if (editing) await updatePerson(editing.id, form)
@@ -70,7 +68,7 @@ export default function PeoplePage({ people, roles, projects, rangeStart, rangeE
 
   function startEdit(p: Person) {
     setEditing(p)
-    setForm({ name: p.name, role_id: p.role_id, sprint_capacity: p.sprint_capacity, pto_days: p.pto_days, sort_order: p.sort_order })
+    setForm({ name: p.name, role_id: p.role_id, sort_order: p.sort_order })
     setAdding(false)
   }
 
@@ -110,22 +108,6 @@ export default function PeoplePage({ people, roles, projects, rangeStart, rangeE
                 {roles.map(r => <option key={r.id} value={r.id}>{r.name}</option>)}
               </select>
             </div>
-            <div>
-              <label className="block text-xs text-gray-500 mb-1">Sprint capacity (days)</label>
-              <input type="number" min="0"
-                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
-                value={form.sprint_capacity}
-                onChange={e => setForm(f => ({ ...f, sprint_capacity: Number(e.target.value) }))}
-              />
-            </div>
-            <div>
-              <label className="block text-xs text-gray-500 mb-1">PTO / BH this sprint (days)</label>
-              <input type="number" min="0"
-                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
-                value={form.pto_days}
-                onChange={e => setForm(f => ({ ...f, pto_days: Number(e.target.value) }))}
-              />
-            </div>
           </div>
           <div className="flex gap-2 justify-end">
             <button onClick={() => { setEditing(null); setAdding(false) }}
@@ -143,60 +125,34 @@ export default function PeoplePage({ people, roles, projects, rangeStart, rangeE
               <th className="w-8 px-2 py-3" />
               <th className="text-left px-4 py-3">Name</th>
               <th className="text-left px-4 py-3">Role</th>
-              <th className="text-right px-4 py-3">Capacity (d)</th>
-              <th className="text-right px-4 py-3" title="Days assigned to the PTO project in the timeline">
-                PTO (d)
-                {ptoProject && <span className="ml-1 text-indigo-400">●</span>}
-              </th>
               <th className="px-4 py-3" />
             </tr>
           </thead>
           <tbody>
-            {people.map((p, i) => {
-              const ptoDays = ptoDaysMap.get(p.id) ?? (ptoProject ? 0 : p.pto_days)
-              return (
-                <tr
-                  key={p.id}
-                  draggable
-                  onDragStart={() => onDragStart(p.id)}
-                  onDragOver={e => onDragOver(e, p.id)}
-                  onDrop={() => onDrop(p.id)}
-                  onDragEnd={reset}
-                  className={`transition-colors ${
-                    dropId === p.id
-                      ? 'bg-indigo-50 border-t-2 border-indigo-400'
-                      : i % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'
-                  }`}
-                >
-                  <td className="px-2 py-3 text-center cursor-grab text-gray-300 hover:text-gray-500 select-none">⠿</td>
-                  <td className="px-4 py-3 font-medium text-gray-800">{p.name}</td>
-                  <td className="px-4 py-3 text-gray-600">{p.role_name ?? <span className="text-gray-300">—</span>}</td>
-                  <td className="px-4 py-3 text-right text-gray-600">{p.sprint_capacity}d</td>
-                  <td className="px-4 py-3 text-right text-gray-600">
-                    {ptoDays > 0
-                      ? <span className="font-medium text-amber-600">{ptoDays}d</span>
-                      : <span className="text-gray-400">—</span>
-                    }
-                  </td>
-                  <td className="px-4 py-3 text-right">
-                    <button onClick={() => startEdit(p)} className="text-indigo-600 hover:underline mr-3">Edit</button>
-                    <button onClick={() => handleDelete(p.id)} className="text-red-500 hover:underline">Delete</button>
-                  </td>
-                </tr>
-              )
-            })}
+            {people.map((p) => (
+              <tr
+                key={p.id}
+                draggable
+                onDragStart={() => onDragStart(p.id)}
+                onDragOver={e => onDragOver(e, p.id)}
+                onDrop={() => onDrop(p.id)}
+                onDragEnd={reset}
+                style={{ backgroundColor: dropId !== p.id ? roleBg(p.role_id, roles) : undefined }}
+                className={`transition-colors ${dropId === p.id ? 'bg-indigo-50 border-t-2 border-indigo-400' : ''}`}
+              >
+                <td className="px-2 py-3 text-center cursor-grab text-gray-300 hover:text-gray-500 select-none">⠿</td>
+                <td className="px-4 py-3 font-medium text-gray-800">{p.name}</td>
+                <td className="px-4 py-3 text-gray-600">{p.role_name ?? <span className="text-gray-300">—</span>}</td>
+                <td className="px-4 py-3 text-right">
+                  <div className="flex items-center justify-end gap-1">
+                    <button onClick={() => startEdit(p)} title="Edit" className="p-1.5 text-indigo-500 hover:text-indigo-700 hover:bg-indigo-50 rounded-md transition-colors"><IconEdit /></button>
+                    <button onClick={() => handleDelete(p.id)} title="Delete" className="p-1.5 text-red-400 hover:text-red-600 hover:bg-red-50 rounded-md transition-colors"><IconDelete /></button>
+                  </div>
+                </td>
+              </tr>
+            ))}
           </tbody>
         </table>
-        {ptoProject && (
-          <div className="px-4 py-2 border-t border-gray-100 text-xs text-gray-400">
-            <span className="text-indigo-400">●</span> PTO days counted from assignments to the <strong>{ptoProject.name}</strong> project · {isoDate(rangeStart)} – {isoDate(rangeEnd)}
-          </div>
-        )}
-        {!ptoProject && (
-          <div className="px-4 py-2 border-t border-gray-100 text-xs text-amber-600">
-            No project named "PTO" found — showing static pto_days field. Create a project named "PTO" to track it dynamically.
-          </div>
-        )}
       </div>
     </div>
   )

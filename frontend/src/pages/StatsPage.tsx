@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { isoDate, getSprintAnchor, countWorkingDays } from '../utils/dates'
+import { isoDate, getSprintAnchor, countEffectiveDays, projectInitials } from '../utils/dates'
 import type { Project } from '../types'
 
 interface PersonStat {
@@ -7,13 +7,8 @@ interface PersonStat {
   name: string
   role_name: string | null
   role_multiplier: number
-  sprint_capacity: number
-  pto_days: number
-  availability: number
   allocated: number
   allocated_weighted: number
-  remaining: number
-  utilization_pct: number
   by_project: Record<number, number>
 }
 
@@ -42,7 +37,7 @@ interface Props {
   projects: Project[]
 }
 
-type PeriodType = 'year' | 'semester' | 'quarter' | 'sprint'
+type PeriodType = 'year' | 'semester' | 'quarter' | 'month' | 'sprint'
 
 function countDays(from: Date, to: Date): number {
   return Math.round((to.getTime() - from.getTime()) / 86400000) + 1
@@ -68,6 +63,11 @@ function getPeriodRange(type: PeriodType, index: number, rangeStart: Date, range
         [new Date(y, 9, 1), new Date(y, 11, 31)],
       ]
       return quarters[Math.min(index, 3)]
+    }
+    case 'month': {
+      const from = new Date(y, index, 1)
+      const to = new Date(y, index + 1, 0)
+      return [from, to]
     }
     case 'sprint': {
       const anchor = getSprintAnchor(rangeStart)
@@ -95,6 +95,10 @@ function getPeriodOptions(type: PeriodType, rangeStart: Date, rangeEnd: Date): s
       return ['S1 (Jan – Jun)', 'S2 (Jul – Dec)']
     case 'quarter':
       return ['Q3 (Jan – Mar)', 'Q4 (Apr – Jun)', 'Q1 (Jul – Sep)', 'Q2 (Oct – Dec)']
+    case 'month':
+      return Array.from({ length: 12 }, (_, i) =>
+        new Date(rangeStart.getFullYear(), i, 1).toLocaleString('default', { month: 'long' })
+      )
     case 'sprint': {
       const n = totalSprints(rangeStart, rangeEnd)
       return Array.from({ length: n }, (_, i) => {
@@ -117,6 +121,7 @@ function getCurrentIndex(type: PeriodType, rangeStart: Date, rangeEnd: Date): nu
       if (m < 9) return 2
       return 3
     }
+    case 'month': return today.getMonth()
     case 'sprint': {
       const anchor = getSprintAnchor(rangeStart)
       if (today < anchor) return 0
@@ -158,11 +163,12 @@ export default function StatsPage({ rangeStart, rangeEnd, projects }: Props) {
       case 'year':     return 'year'
       case 'semester': return `S${periodIndex + 1}`
       case 'quarter':  return quarterLabels[periodIndex]
+      case 'month':    return new Date(rangeStart.getFullYear(), periodIndex, 1).toLocaleString('default', { month: 'short' }).toLowerCase()
       case 'sprint':   return `sprint-${periodIndex + 1}`
     }
   })()
   const totalDays = countDays(statsFrom, statsTo)
-  const workingDays = countWorkingDays(statsFrom, statsTo)
+  const effectiveDays = countEffectiveDays(statsFrom, statsTo)
 
   function changePeriodType(t: PeriodType) {
     setPeriodType(t)
@@ -192,13 +198,13 @@ export default function StatsPage({ rangeStart, rangeEnd, projects }: Props) {
       rows.push([
         p.name,
         p.role_name ?? '',
-        workingDays - p.allocated,
+        effectiveDays - p.allocated,
         p.allocated,
-        workingDays > 0 ? Math.round(p.allocated / workingDays * 1000) / 10 : 0,
+        effectiveDays > 0 ? Math.round(p.allocated / effectiveDays * 1000) / 10 : 0,
         ...projectList.map(proj => p.by_project[proj.id] ?? 0),
       ])
     })
-    rows.push(['Total', '', stats.people.reduce((s, p) => s + (workingDays - p.allocated), 0), stats.people.reduce((s, p) => s + p.allocated, 0), '', ...projectList.map(() => '')])
+    rows.push(['Total', '', stats.people.reduce((s, p) => s + (effectiveDays - p.allocated), 0), stats.people.reduce((s, p) => s + p.allocated, 0), '', ...projectList.map(() => '')])
     downloadCsv(rows.map(r => r.map(String)), `stats-people_${filterLabel}_${isoDate(statsFrom)}_${isoDate(statsTo)}.csv`)
   }
 
@@ -271,7 +277,7 @@ export default function StatsPage({ rangeStart, rangeEnd, projects }: Props) {
           <div className="flex items-center gap-3 mb-4">
             <span className="text-xs text-gray-500 font-medium">Period</span>
             <div className="flex gap-1 bg-gray-100 rounded-lg p-1">
-              {(['year', 'semester', 'quarter', 'sprint'] as PeriodType[]).map(t => (
+              {(['year', 'semester', 'quarter', 'month', 'sprint'] as PeriodType[]).map(t => (
                 <button
                   key={t}
                   onClick={() => changePeriodType(t)}
@@ -309,9 +315,9 @@ export default function StatsPage({ rangeStart, rangeEnd, projects }: Props) {
           </div>
 
           <div className="bg-indigo-50 border border-indigo-100 rounded-xl px-4 py-3 mb-4 text-xs text-indigo-700 flex flex-wrap gap-x-6 gap-y-1">
-            <span><strong>Available</strong> = working days in period without any assignment ({workingDays} working days)</span>
+            <span><strong>Available</strong> = working days in period without any assignment ({effectiveDays} effective days, excl. holidays)</span>
             <span><strong>Allocated</strong> = assigned days in period</span>
-            <span><strong>Utilization</strong> = Allocated ÷ working days</span>
+            <span><strong>Utilization</strong> = Allocated ÷ effective days</span>
           </div>
 
           <div className="bg-white border border-gray-200 rounded-xl overflow-hidden shadow-sm">
@@ -328,8 +334,8 @@ export default function StatsPage({ rangeStart, rangeEnd, projects }: Props) {
               </thead>
               <tbody>
                 {stats.people.map((p, i) => {
-                  const available = workingDays - p.allocated
-                  const utilizationPct = workingDays > 0 ? Math.round(p.allocated / workingDays * 1000) / 10 : 0
+                  const available = effectiveDays - p.allocated
+                  const utilizationPct = effectiveDays > 0 ? Math.round(p.allocated / effectiveDays * 1000) / 10 : 0
                   return (
                     <tr key={p.person_id} className={i % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'}>
                       <td className="px-4 py-2.5 font-medium text-gray-800">{p.name}</td>
@@ -371,7 +377,7 @@ export default function StatsPage({ rangeStart, rangeEnd, projects }: Props) {
                 <tr>
                   <td colSpan={2} className="px-4 py-2">Total</td>
                   <td className="px-4 py-2 text-right">
-                    {stats.people.reduce((s, p) => s + (workingDays - p.allocated), 0)}
+                    {stats.people.reduce((s, p) => s + (effectiveDays - p.allocated), 0)}
                   </td>
                   <td className="px-4 py-2 text-right">{stats.people.reduce((s, p) => s + p.allocated, 0)}</td>
                   <td colSpan={2} />
@@ -409,7 +415,12 @@ export default function StatsPage({ rangeStart, rangeEnd, projects }: Props) {
                     <tr key={proj.project_id} className={i % 2 === 0 ? 'bg-white' : 'bg-gray-50/50'}>
                       <td className="px-4 py-2.5">
                         <div className="flex items-center gap-2">
-                          <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: proj.color }} />
+                          <span
+                            className="w-9 h-9 rounded-full flex-shrink-0 flex items-center justify-center text-white text-xs font-bold"
+                            style={{ backgroundColor: proj.color }}
+                          >
+                            {projectInitials(proj.name)}
+                          </span>
                           <span className="font-medium text-gray-800">{proj.name}</span>
                         </div>
                       </td>
