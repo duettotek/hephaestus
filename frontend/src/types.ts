@@ -25,4 +25,5 @@ export interface Assignment {
   person_id: number
   project_id: number
   date: string // ISO "YYYY-MM-DD"
+  short_text: string | null
 }

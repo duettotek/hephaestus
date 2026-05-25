@@ -46,7 +46,23 @@ class Assignment(Base):
     project_id = Column(Integer, ForeignKey("projects.id"), nullable=False)
     date = Column(Date, nullable=False)
 
+    short_text = Column(String, nullable=True)
+
     __table_args__ = (UniqueConstraint("person_id", "date", name="uq_person_date"),)
 
     person = relationship("Person", back_populates="assignments")
     project = relationship("Project", back_populates="assignments")
+
+
+class CellNote(Base):
+    __tablename__ = "cell_notes"
+
+    id = Column(Integer, primary_key=True, index=True)
+    person_id = Column(Integer, ForeignKey("people.id"), nullable=False)
+    date = Column(Date, nullable=False)
+    note = Column(String, nullable=False, default="")
+    tag = Column(String, nullable=True)
+
+    __table_args__ = (UniqueConstraint("person_id", "date", name="uq_note_person_date"),)
+
+    person = relationship("Person")

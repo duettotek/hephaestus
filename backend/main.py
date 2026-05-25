@@ -25,6 +25,30 @@ with engine.connect() as _conn:
         _conn.commit()
     except Exception:
         pass  # column already exists
+    try:
+        _conn.execute(text("ALTER TABLE assignments ADD COLUMN short_text TEXT"))
+        _conn.commit()
+    except Exception:
+        pass  # column already exists
+    try:
+        _conn.execute(text(
+            "CREATE TABLE IF NOT EXISTS cell_notes ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "person_id INTEGER NOT NULL REFERENCES people(id) ON DELETE CASCADE, "
+            "date DATE NOT NULL, "
+            "note TEXT NOT NULL DEFAULT '', "
+            "tag TEXT, "
+            "UNIQUE(person_id, date)"
+            ")"
+        ))
+        _conn.commit()
+    except Exception:
+        pass
+    try:
+        _conn.execute(text("ALTER TABLE cell_notes ADD COLUMN tag TEXT"))
+        _conn.commit()
+    except Exception:
+        pass
 
 app = FastAPI(title="Capacity Planner")
 
@@ -89,8 +113,14 @@ class AssignmentOut(BaseModel):
     person_id: int
     project_id: int
     date: date
+    short_text: Optional[str] = None
     class Config:
         from_attributes = True
+
+class AssignmentTextUpdate(BaseModel):
+    person_id: int
+    date: date
+    short_text: str
 
 class BulkAssignRequest(BaseModel):
     person_id: int
@@ -100,6 +130,21 @@ class BulkAssignRequest(BaseModel):
 class BulkDeleteRequest(BaseModel):
     person_id: int
     dates: list[date]
+
+class CellNoteUpsert(BaseModel):
+    person_id: int
+    date: date
+    note: str
+    tag: Optional[str] = None
+
+class CellNoteOut(BaseModel):
+    person_id: int
+    date: date
+    note: str
+    tag: Optional[str] = None
+    class Config:
+        from_attributes = True
+
 
 
 # ── Roles ─────────────────────────────────────────────────────────────────────
@@ -245,7 +290,7 @@ def list_assignments(date_from: date, date_to: date, db: Session = Depends(get_d
         and_(models.Assignment.date >= date_from, models.Assignment.date <= date_to)
     ).all()
     return [
-        {"id": r.id, "person_id": r.person_id, "project_id": r.project_id, "date": r.date.isoformat()}
+        {"id": r.id, "person_id": r.person_id, "project_id": r.project_id, "date": r.date.isoformat(), "short_text": r.short_text}
         for r in rows
     ]
 
@@ -268,6 +313,55 @@ def bulk_delete(req: BulkDeleteRequest, db: Session = Depends(get_db)):
         db.query(models.Assignment).filter(
             and_(models.Assignment.person_id == req.person_id, models.Assignment.date == d)
         ).delete()
+    db.commit()
+    return {"ok": True}
+
+@app.put("/api/assignments/text")
+def update_assignment_text(req: AssignmentTextUpdate, db: Session = Depends(get_db)):
+    a = db.query(models.Assignment).filter(
+        and_(models.Assignment.person_id == req.person_id, models.Assignment.date == req.date)
+    ).first()
+    if not a:
+        raise HTTPException(status_code=404, detail="Assignment not found")
+    a.short_text = req.short_text.strip() or None
+    db.commit()
+    return {"ok": True}
+
+@app.get("/api/notes")
+def list_notes(date_from: date, date_to: date, db: Session = Depends(get_db)):
+    rows = db.query(models.CellNote).filter(
+        and_(models.CellNote.date >= date_from, models.CellNote.date <= date_to)
+    ).all()
+    return [{"person_id": r.person_id, "date": r.date.isoformat(), "note": r.note, "tag": r.tag} for r in rows]
+
+@app.put("/api/notes")
+def upsert_note(req: CellNoteUpsert, db: Session = Depends(get_db)):
+    existing = db.query(models.CellNote).filter(
+        and_(models.CellNote.person_id == req.person_id, models.CellNote.date == req.date)
+    ).first()
+    note_text = req.note.strip()
+    tag_val = req.tag if req.tag and req.tag != "None" else None
+    has_content = bool(note_text) or tag_val is not None
+    if existing:
+        if has_content:
+            existing.note = note_text
+            existing.tag = tag_val
+        else:
+            db.delete(existing)
+    elif has_content:
+        db.add(models.CellNote(person_id=req.person_id, date=req.date, note=note_text, tag=tag_val))
+    db.commit()
+    return {"ok": True}
+
+@app.delete("/api/notes")
+def delete_notes_bulk(person_id: int, date_from: date, date_to: date, db: Session = Depends(get_db)):
+    db.query(models.CellNote).filter(
+        and_(
+            models.CellNote.person_id == person_id,
+            models.CellNote.date >= date_from,
+            models.CellNote.date <= date_to,
+        )
+    ).delete()
     db.commit()
     return {"ok": True}
 

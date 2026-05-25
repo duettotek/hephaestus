@@ -1,12 +1,12 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
 import type { Person, Project } from '../types'
-import { getAssignments, bulkAssign, bulkDelete } from '../api'
+import { getAssignments, bulkAssign, bulkDelete, getNotes, upsertNote } from '../api'
 import {
   isoDate, daysInRange, isWeekend, italianHolidays,
   formatDayHeader, shortDayName, monthLabel, getSprintAnchor, projectInitials,
 } from '../utils/dates'
 
-const CELL_W = 28
+const CELL_W_DEFAULT = 54
 const CELL_H = 32
 const NAME_W = 180
 const SPRINT_DAYS = 14
@@ -49,6 +49,21 @@ interface DragState {
   projectId: number | null
 }
 
+const NOTE_TAGS = ['LF-R', 'LF-F', 'SF', 'MF', 'None'] as const
+type NoteTag = typeof NOTE_TAGS[number]
+
+const NOTE_SUGGESTIONS = ['Support', 'Team Coord', 'Courses'] as const
+
+interface NoteDialog {
+  personId: number
+  personName: string
+  date: string
+  text: string
+  tag: NoteTag
+  showSuggestions: boolean
+}
+
+
 const QUARTER_START_MONTHS = new Set([0, 3, 6, 9])   // Jan, Apr, Jul, Oct
 const QUARTER_END_MONTHS   = new Set([2, 5, 8, 11])  // Mar, Jun, Sep, Dec
 
@@ -71,8 +86,15 @@ function sprintLabel(days: Date[]): string {
 }
 
 export default function Timeline({ people, projects, rangeStart, rangeEnd }: Props) {
+  const [cellW, setCellW] = useState(CELL_W_DEFAULT)
   const [assignments, setAssignments] = useState<Map<string, number>>(new Map())
+  const [cellNotes, setCellNotes] = useState<Map<string, string>>(new Map())
+  const [cellTags, setCellTags] = useState<Map<string, string>>(new Map())
+  const [noteDialog, setNoteDialog] = useState<NoteDialog | null>(null)
   const [drag, setDrag] = useState<DragState | null>(null)
+  const [pendingErase, setPendingErase] = useState<DragState | null>(null)
+  const [exportFilename, setExportFilename] = useState<string | null>(null)
+  const [exportPlanFilename, setExportPlanFilename] = useState<string | null>(null)
   const [activeProject, setActiveProject] = useState<number | null>(projects[0]?.id ?? null)
   const [loading, setLoading] = useState(true)
   const [viewMode, setViewMode] = useState<ViewMode>('full')
@@ -90,10 +112,21 @@ export default function Timeline({ people, projects, rangeStart, rangeEnd }: Pro
   const fetchAssignments = useCallback(async () => {
     setLoading(true)
     try {
-      const data = await getAssignments(isoDate(rangeStart), isoDate(rangeEnd))
-      const map = new Map<string, number>()
-      data.forEach(a => map.set(`${a.person_id}:${a.date}`, a.project_id))
-      setAssignments(map)
+      const [data, notes] = await Promise.all([
+        getAssignments(isoDate(rangeStart), isoDate(rangeEnd)),
+        getNotes(isoDate(rangeStart), isoDate(rangeEnd)),
+      ])
+      const aMap = new Map<string, number>()
+      data.forEach(a => aMap.set(`${a.person_id}:${a.date}`, a.project_id))
+      const nMap = new Map<string, string>()
+      const tMap = new Map<string, string>()
+      notes.forEach(n => {
+        nMap.set(`${n.person_id}:${n.date}`, n.note)
+        if (n.tag) tMap.set(`${n.person_id}:${n.date}`, n.tag)
+      })
+      setAssignments(aMap)
+      setCellNotes(nMap)
+      setCellTags(tMap)
     } finally {
       setLoading(false)
     }
@@ -148,7 +181,7 @@ export default function Timeline({ people, projects, rangeStart, rangeEnd }: Pro
     const sprintStart = new Date(sprintAnchor)
     sprintStart.setDate(sprintAnchor.getDate() + idx * SPRINT_DAYS)
     const offset = Math.floor((sprintStart.getTime() - rangeStart.getTime()) / 86_400_000)
-    scrollRef.current.scrollLeft = offset * CELL_W
+    scrollRef.current.scrollLeft = offset * cellW
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Visible days ────────────────────────────────────────────────────────────
@@ -178,8 +211,18 @@ export default function Timeline({ people, projects, rangeStart, rangeEnd }: Pro
 
   async function commitDrag(d: DragState) {
     const dates = getDragRange(d.startDate, d.endDate, d.projectId === null)
-    if (d.projectId === null) await bulkDelete(d.personId, dates)
-    else await bulkAssign(d.personId, d.projectId, dates)
+    if (d.projectId === null) {
+      await bulkDelete(d.personId, dates)
+      // Delete notes for erased cells
+      const sorted = [...dates].sort()
+      if (sorted.length > 0) {
+        await fetch(`/api/notes?person_id=${d.personId}&date_from=${sorted[0]}&date_to=${sorted[sorted.length - 1]}`, { method: 'DELETE' })
+      }
+      setCellNotes(m => { const n = new Map(m); dates.forEach(date => n.delete(`${d.personId}:${date}`)); return n })
+      setCellTags(m => { const n = new Map(m); dates.forEach(date => n.delete(`${d.personId}:${date}`)); return n })
+    } else {
+      await bulkAssign(d.personId, d.projectId, dates)
+    }
     await fetchAssignments()
   }
 
@@ -194,8 +237,54 @@ export default function Timeline({ people, projects, rangeStart, rangeEnd }: Pro
   }
 
   async function onMouseUp() {
-    if (drag) { await commitDrag(drag); setDrag(null) }
+    if (!drag) return
+    if (drag.projectId === null) {
+      setPendingErase(drag)
+    } else {
+      await commitDrag(drag)
+    }
+    setDrag(null)
   }
+
+  async function confirmErase() {
+    if (!pendingErase) return
+    try { await commitDrag(pendingErase) } catch (e) { console.error('Erase failed', e) }
+    setPendingErase(null)
+  }
+
+  function openNoteDialog(e: React.MouseEvent, person: { id: number; name: string }, date: string) {
+    e.preventDefault()
+    const key = `${person.id}:${date}`
+    const projId = assignments.get(key)
+    const projName = projId ? (projectMap.get(projId)?.name ?? '') : ''
+    const showSuggestions = !projId || projName.toLowerCase().includes('non-project')
+    setNoteDialog({
+      personId: person.id,
+      personName: person.name,
+      date,
+      text: cellNotes.get(key) ?? '',
+      tag: (cellTags.get(key) as NoteTag) ?? 'None',
+      showSuggestions,
+    })
+  }
+
+  function closeNoteDialog() {
+    setNoteDialog(null)
+    setPendingErase(null)
+  }
+
+  async function saveNote() {
+    if (!noteDialog) return
+    const { personId, date, text, tag } = noteDialog
+    const key = `${personId}:${date}`
+    const tagVal = tag === 'None' ? null : tag
+    await upsertNote(personId, date, text, tagVal)
+    setCellNotes(m => { const n = new Map(m); text.trim() ? n.set(key, text) : n.delete(key); return n })
+    setCellTags(m => { const n = new Map(m); tagVal ? n.set(key, tagVal) : n.delete(key); return n })
+    setNoteDialog(null)
+    setPendingErase(null)
+  }
+
 
   // Optimistic preview
   const previewMap = new Map(assignments)
@@ -205,6 +294,95 @@ export default function Timeline({ people, projects, rangeStart, rangeEnd }: Pro
       if (drag.projectId === null) previewMap.delete(key)
       else previewMap.set(key, drag.projectId)
     })
+  }
+
+  // ── CSV export ──────────────────────────────────────────────────────────────
+  function confirmExportCsv() {
+    if (days.length === 0) return
+    const filename = `timeline_${viewMode}_${isoDate(days[0])}_${isoDate(days[days.length - 1])}.csv`
+    setExportFilename(filename)
+  }
+
+  function doExportCsv() {
+    if (!exportFilename || days.length === 0) return
+    const visibleDays = days.filter(d => !isWeekend(d) && !holidays.has(isoDate(d)))
+    const headers = ['Person', ...visibleDays.map(d =>
+      `${d.toLocaleDateString('en-US', { weekday: 'long' })} ${isoDate(d)}`
+    )]
+    const rows: string[][] = [headers]
+    people.forEach(person => {
+      const cells = visibleDays.map(d => {
+        const key = `${person.id}:${isoDate(d)}`
+        const projId = assignments.get(key)
+        const projName = projId ? (projectMap.get(projId)?.name ?? '') : ''
+        const note = cellNotes.get(key) ?? ''
+        if (projName && note) return `${projName} | ${note}`
+        return projName || note
+      })
+      rows.push([person.name, ...cells])
+    })
+    const csv = '﻿' + rows.map(r => r.map(c => `"${c.replace(/"/g, '""')}"`).join(',')).join('\n')
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.setAttribute('href', url)
+    a.setAttribute('download', exportFilename)
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
+    setExportFilename(null)
+  }
+
+  function confirmExportPlan() {
+    if (days.length === 0) return
+    const filename = `plan_${viewMode}_${isoDate(days[0])}_${isoDate(days[days.length - 1])}.csv`
+    setExportPlanFilename(filename)
+  }
+
+  function doExportPlan() {
+    if (!exportPlanFilename || days.length === 0) return
+    const workingDays = days.filter(d => !isWeekend(d) && !holidays.has(isoDate(d)))
+
+    // Collect all entries that have a note or tag
+    const entries: { tag: string; person: string; date: string; project: string; note: string }[] = []
+    people.forEach(person => {
+      workingDays.forEach(d => {
+        const key = `${person.id}:${isoDate(d)}`
+        const note = cellNotes.get(key) ?? ''
+        const tag = cellTags.get(key) ?? ''
+        if (!note && !tag) return
+        const projId = assignments.get(key)
+        const project = projId ? (projectMap.get(projId)?.name ?? '') : ''
+        if (project.toLowerCase().includes('non-project')) return
+        const dateLabel = `${d.toLocaleDateString('en-US', { weekday: 'long' })} ${isoDate(d)}`
+        entries.push({ tag: tag || '—', person: person.name, date: dateLabel, project, note })
+      })
+    })
+
+    // Group by tag in NOTE_TAGS order, then untagged (—)
+    const tagOrder = [...NOTE_TAGS.filter(t => t !== 'None'), '—']
+    const rows: string[][] = []
+    tagOrder.forEach(tag => {
+      const group = entries.filter(e => e.tag === tag)
+      if (group.length === 0) return
+      rows.push([tag])
+      rows.push(['Person', 'Date', 'Project', 'Note'])
+      group.forEach(e => rows.push([e.person, e.date, e.project, e.note]))
+      rows.push([])
+    })
+
+    const csv = '﻿' + rows.map(r => r.map(c => `"${c.replace(/"/g, '""')}"`).join(',')).join('\n')
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.setAttribute('href', url)
+    a.setAttribute('download', exportPlanFilename)
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
+    setExportPlanFilename(null)
   }
 
   // ── Toolbar helpers ─────────────────────────────────────────────────────────
@@ -241,16 +419,52 @@ export default function Timeline({ people, projects, rangeStart, rangeEnd }: Pro
             {p.name}
           </button>
         ))}
-        <button
-          onClick={() => setActiveProject(null)}
-          className={`px-3 py-1 rounded-full text-xs font-medium border transition-all ${
-            activeProject === null ? 'bg-gray-200 ring-2 ring-offset-1 ring-gray-400' : 'bg-white text-gray-500 hover:bg-gray-100'
-          }`}
-        >
-          Erase
-        </button>
 
         <div className="flex-1" />
+
+        {/* Zoom */}
+        <div className="flex items-center gap-1.5">
+          <button
+            onClick={() => setCellW(w => Math.max(14, w - 4))}
+            className="w-6 h-6 flex items-center justify-center rounded bg-gray-100 text-gray-600 hover:bg-gray-200 text-sm font-bold"
+            title="Zoom out"
+          >−</button>
+          <input
+            type="range" min={14} max={80} step={2}
+            value={cellW}
+            onChange={e => setCellW(Number(e.target.value))}
+            className="w-20 accent-indigo-500"
+            title={`Cell width: ${cellW}px`}
+          />
+          <button
+            onClick={() => setCellW(w => Math.min(80, w + 4))}
+            className="w-6 h-6 flex items-center justify-center rounded bg-gray-100 text-gray-600 hover:bg-gray-200 text-sm font-bold"
+            title="Zoom in"
+          >+</button>
+          {cellW !== CELL_W_DEFAULT && (
+            <button
+              onClick={() => setCellW(CELL_W_DEFAULT)}
+              className="text-[10px] text-indigo-500 hover:underline ml-0.5"
+              title="Reset zoom"
+            >reset</button>
+          )}
+        </div>
+
+        {/* Export */}
+        <button
+          onClick={confirmExportCsv}
+          disabled={days.length === 0}
+          className="px-3 py-1 rounded-lg text-xs font-medium bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100 transition-colors disabled:opacity-40"
+        >
+          Export CSV
+        </button>
+        <button
+          onClick={confirmExportPlan}
+          disabled={days.length === 0}
+          className="px-3 py-1 rounded-lg text-xs font-medium bg-violet-50 text-violet-700 border border-violet-200 hover:bg-violet-100 transition-colors disabled:opacity-40"
+        >
+          Export Plan
+        </button>
 
         {/* View toggle */}
         <div className="flex items-center gap-2">
@@ -345,7 +559,7 @@ export default function Timeline({ people, projects, rangeStart, rangeEnd }: Pro
                 <th
                   key={g.label}
                   colSpan={g.days.length}
-                  style={{ width: CELL_W * g.days.length }}
+                  style={{ width: cellW * g.days.length }}
                   className="text-xs font-semibold text-gray-600 text-left px-2 py-1 bg-gray-50 border-b border-r border-gray-200"
                 >
                   {g.label}
@@ -367,7 +581,7 @@ export default function Timeline({ people, projects, rangeStart, rangeEnd }: Pro
                   <th
                     key={dateStr}
                     style={{
-                      width: CELL_W, minWidth: CELL_W,
+                      width: cellW, minWidth: cellW,
                       borderLeft:  isToday ? undefined : qStart ? '2px solid #7c3aed' : undefined,
                       borderRight: qEnd ? '2px solid #7c3aed' : undefined,
                     }}
@@ -412,7 +626,8 @@ export default function Timeline({ people, projects, rangeStart, rangeEnd }: Pro
                     <td
                       key={dateStr}
                       style={{
-                        width: CELL_W, minWidth: CELL_W, height: CELL_H,
+                        width: cellW, minWidth: cellW, height: CELL_H,
+                        position: 'relative',
                         backgroundColor: proj ? proj.color : holiday ? '#fef2f2' : undefined,
                         cursor: ((wknd || holiday) && activeProject !== null) ? 'not-allowed' : (activeProject !== null ? 'crosshair' : 'cell'),
                         opacity: proj ? 0.85 : 1,
@@ -426,11 +641,37 @@ export default function Timeline({ people, projects, rangeStart, rangeEnd }: Pro
                       }`}
                       onMouseDown={((wknd || holiday) && activeProject !== null) ? undefined : () => onCellMouseDown(person.id, dateStr)}
                       onMouseEnter={((wknd || holiday) && activeProject !== null) ? undefined : () => onCellMouseEnter(person.id, dateStr)}
-                      title={proj ? `${person.name} – ${proj.name} – ${dateStr}` : holiday ? `${dateStr} – festività` : dateStr}
+                      onContextMenu={e => openNoteDialog(e, person, dateStr)}
+                      title={(() => {
+                        const key = `${person.id}:${dateStr}`
+                        const note = cellNotes.get(key)
+                        const tag = cellTags.get(key)
+                        const parts = [person.name, proj?.name, tag, note].filter(Boolean)
+                        return parts.length ? parts.join(' | ') : holiday ? `${dateStr} – festività` : dateStr
+                      })()}
                     >
                       {proj && (
                         <span className="flex items-center justify-center h-full text-white font-bold select-none pointer-events-none" style={{ fontSize: 8, lineHeight: 1 }}>
                           {projectInitials(proj.name)}
+                        </span>
+                      )}
+                      {cellNotes.has(`${person.id}:${dateStr}`) && (
+                        <svg className="absolute top-0 right-0 pointer-events-none" width="6" height="6" viewBox="0 0 6 6">
+                          <polygon points="6,0 0,0 6,6" fill="white" />
+                        </svg>
+                      )}
+                      {cellTags.has(`${person.id}:${dateStr}`) && (
+                        <span
+                          className="absolute bottom-0 left-0 pointer-events-none leading-none font-semibold"
+                          style={{
+                            fontSize: 7,
+                            padding: '1px 2px',
+                            background: proj ? 'rgba(255,255,255,0.30)' : 'rgba(99,102,241,0.15)',
+                            color: proj ? 'rgba(255,255,255,0.95)' : '#4338ca',
+                            borderTopRightRadius: 3,
+                          }}
+                        >
+                          {cellTags.get(`${person.id}:${dateStr}`)}
                         </span>
                       )}
                     </td>
@@ -442,11 +683,103 @@ export default function Timeline({ people, projects, rangeStart, rangeEnd }: Pro
         </table>
       </div>
 
+      {/* Export CSV confirmation */}
+      {exportFilename && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/25" onClick={e => { if (e.target === e.currentTarget) setExportFilename(null) }}>
+          <div className="bg-white rounded-xl shadow-xl p-5 w-80">
+            <p className="text-sm font-semibold text-gray-800 mb-1">Export CSV?</p>
+            <p className="text-xs text-gray-500 mb-4 break-all font-mono bg-gray-50 rounded px-2 py-1.5">{exportFilename}</p>
+            <div className="flex gap-2 justify-end">
+              <button onClick={() => setExportFilename(null)} className="px-4 py-1.5 bg-gray-100 text-gray-700 text-sm rounded-lg hover:bg-gray-200">Cancel</button>
+              <button onClick={doExportCsv} className="px-4 py-1.5 bg-emerald-600 text-white text-sm rounded-lg hover:bg-emerald-700">Download</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Export Plan confirmation */}
+      {exportPlanFilename && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/25" onClick={e => { if (e.target === e.currentTarget) setExportPlanFilename(null) }}>
+          <div className="bg-white rounded-xl shadow-xl p-5 w-80">
+            <p className="text-sm font-semibold text-gray-800 mb-1">Export Plan?</p>
+            <p className="text-xs text-gray-500 mb-4 break-all font-mono bg-gray-50 rounded px-2 py-1.5">{exportPlanFilename}</p>
+            <div className="flex gap-2 justify-end">
+              <button onClick={() => setExportPlanFilename(null)} className="px-4 py-1.5 bg-gray-100 text-gray-700 text-sm rounded-lg hover:bg-gray-200">Cancel</button>
+              <button onClick={doExportPlan} className="px-4 py-1.5 bg-violet-600 text-white text-sm rounded-lg hover:bg-violet-700">Download</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Erase confirmation */}
+      {pendingErase && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/25" onClick={e => { if (e.target === e.currentTarget) setPendingErase(null) }}>
+          <div className="bg-white rounded-xl shadow-xl p-5 w-64 text-center">
+            <p className="text-sm font-semibold text-gray-800 mb-1">Erase assignments?</p>
+            <p className="text-xs text-gray-400 mb-4">This will remove the selected cells.</p>
+            <div className="flex gap-2 justify-center">
+              <button onClick={() => setPendingErase(null)} className="px-4 py-1.5 bg-gray-100 text-gray-700 text-sm rounded-lg hover:bg-gray-200">No</button>
+              <button onClick={confirmErase} className="px-4 py-1.5 bg-red-500 text-white text-sm rounded-lg hover:bg-red-600">Yes, erase</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Note dialog */}
+      {noteDialog && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/25" onClick={e => { if (e.target === e.currentTarget) closeNoteDialog() }}>
+          <div className="bg-white rounded-xl shadow-xl p-5 w-72">
+            <p className="text-sm font-semibold text-gray-800">{noteDialog.personName}</p>
+            <p className="text-xs text-gray-400 mb-3">{noteDialog.date}</p>
+            <div className="flex gap-1 mb-3">
+              {NOTE_TAGS.map(t => (
+                <button
+                  key={t}
+                  onClick={() => setNoteDialog(d => d ? { ...d, tag: t } : d)}
+                  className={`flex-1 py-1 rounded-md text-xs font-medium border transition-colors ${
+                    noteDialog.tag === t
+                      ? 'bg-indigo-600 text-white border-indigo-600'
+                      : 'bg-white text-gray-600 border-gray-300 hover:border-indigo-400 hover:text-indigo-600'
+                  }`}
+                >
+                  {t}
+                </button>
+              ))}
+            </div>
+            {noteDialog.showSuggestions && !noteDialog.text && (
+              <div className="flex gap-1.5 mb-2">
+                {NOTE_SUGGESTIONS.map(s => (
+                  <button
+                    key={s}
+                    onClick={() => setNoteDialog(d => d ? { ...d, text: s } : d)}
+                    className="px-2.5 py-1 rounded-full text-xs border border-gray-300 text-gray-500 hover:border-indigo-400 hover:text-indigo-600 hover:bg-indigo-50 transition-colors"
+                  >
+                    {s}
+                  </button>
+                ))}
+              </div>
+            )}
+            <textarea
+              autoFocus
+              rows={3}
+              maxLength={200}
+              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-indigo-300"
+              placeholder="Short note…"
+              value={noteDialog.text}
+              onChange={e => setNoteDialog(d => d ? { ...d, text: e.target.value } : d)}
+              onKeyDown={e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) saveNote(); if (e.key === 'Escape') closeNoteDialog() }}
+            />
+            <div className="flex gap-2 justify-end mt-3">
+              <button onClick={closeNoteDialog} className="px-4 py-1.5 bg-gray-100 text-gray-700 text-sm rounded-lg hover:bg-gray-200">Cancel</button>
+              <button onClick={saveNote} className="px-4 py-1.5 bg-indigo-600 text-white text-sm rounded-lg hover:bg-indigo-700">Save</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Footer */}
       <div className="flex gap-4 px-4 py-2 bg-white border-t border-gray-200 text-xs text-gray-500">
         <span>Click & drag to assign days</span>
-        <span>·</span>
-        <span>Select "Erase" to remove</span>
         {viewMode === 'semester' && (
           <><span>·</span><span>{SEMESTERS[semesterIndex].label}: {days.length} days ({days.filter(d => !isWeekend(d)).length} working)</span></>
         )}

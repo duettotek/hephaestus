@@ -37,3 +37,14 @@ export const bulkAssign = (person_id: number, project_id: number, dates: string[
 
 export const bulkDelete = (person_id: number, dates: string[]) =>
   json(`${BASE}/assignments/bulk`, { method: 'DELETE', body: JSON.stringify({ person_id, dates }) })
+
+export const updateAssignmentText = (person_id: number, date: string, short_text: string) =>
+  json(`${BASE}/assignments/text`, { method: 'PUT', body: JSON.stringify({ person_id, date, short_text }) })
+
+// Cell notes (persist independently of assignments)
+export const getNotes = (dateFrom: string, dateTo: string) =>
+  json<{ person_id: number; date: string; note: string; tag: string | null }[]>(`${BASE}/notes?date_from=${dateFrom}&date_to=${dateTo}`)
+
+export const upsertNote = (person_id: number, date: string, note: string, tag: string | null) =>
+  json(`${BASE}/notes`, { method: 'PUT', body: JSON.stringify({ person_id, date, note, tag }) })
+
