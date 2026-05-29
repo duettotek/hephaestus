@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { isoDate, getSprintAnchor, countEffectiveDays, projectInitials } from '../utils/dates'
+import { getToken } from '../api'
 import type { Project } from '../types'
 
 interface PersonStat {
@@ -229,7 +230,10 @@ export default function StatsPage({ rangeStart, rangeEnd, projects }: Props) {
 
   useEffect(() => {
     setLoading(true)
-    fetch(`/api/stats?date_from=${isoDate(statsFrom)}&date_to=${isoDate(statsTo)}`)
+    const token = getToken()
+    fetch(`/api/stats?date_from=${isoDate(statsFrom)}&date_to=${isoDate(statsTo)}`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    })
       .then(r => r.json())
       .then(data => { setStats(data); setLoading(false) })
   }, [isoDate(statsFrom), isoDate(statsTo)])

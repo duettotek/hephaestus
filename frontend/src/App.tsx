@@ -1,15 +1,17 @@
 import { useEffect, useState, useCallback } from 'react'
-import type { Person, Project, Role } from './types'
-import { getPeople, getProjects, getRoles } from './api'
+import type { Person, Project, Role, Plant } from './types'
+import { getPeople, getProjects, getRoles, getPlants, getToken, clearToken, getMe } from './api'
 import Timeline from './components/Timeline'
 import PeoplePage from './pages/PeoplePage'
 import ProjectsPage from './pages/ProjectsPage'
 import RolesPage from './pages/RolesPage'
 import StatsPage from './pages/StatsPage'
+import LoginPage from './pages/LoginPage'
+import UsersPage from './pages/UsersPage'
+import PlantsPage from './pages/PlantsPage'
 import { isoDate } from './utils/dates'
 
-type Tab = 'timeline' | 'stats' | 'people' | 'projects' | 'roles'
-
+type Tab = 'timeline' | 'stats' | 'people' | 'projects' | 'roles' | 'plants' | 'users'
 
 function getRangeStart(): Date {
   return new Date(new Date().getFullYear(), 0, 1)
@@ -20,22 +22,59 @@ function getRangeEnd(start: Date): Date {
 }
 
 export default function App() {
+  const [authed, setAuthed] = useState<boolean | null>(null) // null = checking
+  const [username, setUsername] = useState('')
   const [tab, setTab] = useState<Tab>('timeline')
   const [people, setPeople] = useState<Person[]>([])
   const [projects, setProjects] = useState<Project[]>([])
   const [roles, setRoles] = useState<Role[]>([])
+  const [plants, setPlants] = useState<Plant[]>([])
 
   const [rangeStart] = useState<Date>(getRangeStart)
   const [rangeEnd] = useState<Date>(() => getRangeEnd(getRangeStart()))
 
+  // Verify token on mount
+  useEffect(() => {
+    if (!getToken()) { setAuthed(false); return }
+    getMe()
+      .then(me => { setUsername(me.username); setAuthed(true) })
+      .catch(() => { clearToken(); setAuthed(false) })
+  }, [])
+
   const loadAll = useCallback(async () => {
-    const [p, pr, r] = await Promise.all([getPeople(), getProjects(), getRoles()])
+    const [p, pr, r, pl] = await Promise.all([getPeople(), getProjects(), getRoles(), getPlants()])
     setPeople(p)
     setProjects(pr)
     setRoles(r)
+    setPlants(pl)
   }, [])
 
-  useEffect(() => { loadAll() }, [loadAll])
+  useEffect(() => { if (authed) loadAll() }, [authed, loadAll])
+
+  function handleLogout() {
+    clearToken()
+    setAuthed(false)
+    setUsername('')
+  }
+
+  // Loading check
+  if (authed === null) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+        <span className="text-sm text-gray-400">Loading…</span>
+      </div>
+    )
+  }
+
+  if (!authed) {
+    return (
+      <LoginPage onLogin={() => {
+        getMe().then(me => setUsername(me.username))
+        setTab('timeline')
+        setAuthed(true)
+      }} />
+    )
+  }
 
   const tabs: { id: Tab; label: string }[] = [
     { id: 'timeline', label: 'Timeline' },
@@ -43,6 +82,8 @@ export default function App() {
     { id: 'people', label: 'People' },
     { id: 'projects', label: 'Projects' },
     { id: 'roles', label: 'Roles' },
+    { id: 'plants', label: 'Plants' },
+    ...(username === 'admin' ? [{ id: 'users' as Tab, label: 'Users' }] : []),
   ]
 
   return (
@@ -69,8 +110,16 @@ export default function App() {
             </button>
           ))}
         </nav>
-        <div className="ml-auto text-xs text-gray-400">
-          {people.length} people · {projects.length} projects
+        <div className="ml-auto flex items-center gap-3 text-xs text-gray-400">
+          <span>{people.length} people · {projects.length} projects</span>
+          <span className="text-gray-300">|</span>
+          <span className="font-medium text-gray-600">{username}</span>
+          <button
+            onClick={handleLogout}
+            className="px-2.5 py-1 rounded-md bg-gray-100 text-gray-500 hover:bg-gray-200 hover:text-gray-700 transition-colors"
+          >
+            Sign out
+          </button>
         </div>
       </header>
 
@@ -79,6 +128,7 @@ export default function App() {
           <Timeline
             people={people}
             projects={projects}
+            plants={plants}
             rangeStart={rangeStart}
             rangeEnd={rangeEnd}
           />
@@ -91,6 +141,8 @@ export default function App() {
         {tab === 'people' && <div className="h-full overflow-auto"><PeoplePage people={people} roles={roles} onRefresh={loadAll} /></div>}
         {tab === 'projects' && <div className="h-full overflow-auto"><ProjectsPage projects={projects} onRefresh={loadAll} /></div>}
         {tab === 'roles' && <div className="h-full overflow-auto"><RolesPage roles={roles} onRefresh={loadAll} /></div>}
+        {tab === 'plants' && <div className="h-full overflow-auto"><PlantsPage plants={plants} onRefresh={loadAll} /></div>}
+        {tab === 'users' && <div className="h-full overflow-auto"><UsersPage currentUsername={username} /></div>}
       </main>
     </div>
   )

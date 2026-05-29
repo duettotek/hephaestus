@@ -1,6 +1,15 @@
-from sqlalchemy import Column, Integer, String, Float, Date, ForeignKey, UniqueConstraint
+from sqlalchemy import Column, Integer, String, Float, Date, ForeignKey, UniqueConstraint, Boolean
 from sqlalchemy.orm import relationship
 from database import Base
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    username = Column(String, unique=True, nullable=False)
+    hashed_password = Column(String, nullable=False)
+    is_active = Column(Boolean, default=True)
 
 
 class Role(Base):
@@ -34,6 +43,7 @@ class Project(Base):
     color = Column(String, default="#6366f1")
     sort_order = Column(Integer, default=0)
     pattern_box_group = Column(Integer, nullable=True)
+    text_avatar = Column(String, nullable=True)
 
     assignments = relationship("Assignment", back_populates="project", cascade="all, delete-orphan")
 
@@ -61,8 +71,17 @@ class CellNote(Base):
     person_id = Column(Integer, ForeignKey("people.id"), nullable=False)
     date = Column(Date, nullable=False)
     note = Column(String, nullable=False, default="")
-    tag = Column(String, nullable=True)
+    plant = Column(String, nullable=True)
+    value_stream = Column(String, nullable=True)
 
     __table_args__ = (UniqueConstraint("person_id", "date", name="uq_note_person_date"),)
 
     person = relationship("Person")
+
+
+class Plant(Base):
+    __tablename__ = "plants"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, nullable=False)
+    value_stream = Column(String, nullable=False)

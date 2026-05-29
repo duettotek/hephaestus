@@ -16,7 +16,7 @@ const PALETTE = [
 
 export default function ProjectsPage({ projects, onRefresh }: Props) {
   const [editing, setEditing] = useState<Project | null>(null)
-  const [form, setForm] = useState({ name: '', demand_days: 0, color: PALETTE[0], pattern_box_group: null as number | null })
+  const [form, setForm] = useState({ name: '', demand_days: 0, color: PALETTE[0], pattern_box_group: null as number | null, text_avatar: '' })
   const [adding, setAdding] = useState(false)
 
   // drag state
@@ -24,11 +24,12 @@ export default function ProjectsPage({ projects, onRefresh }: Props) {
   const [dropId, setDropId] = useState<number | null>(null)  // row being hovered over
 
   async function handleSave() {
-    if (editing) await updateProject(editing.id, form)
-    else await createProject(form)
+    const payload = { ...form, text_avatar: form.text_avatar.trim() || null }
+    if (editing) await updateProject(editing.id, payload)
+    else await createProject(payload)
     setEditing(null)
     setAdding(false)
-    setForm({ name: '', demand_days: 0, color: PALETTE[0], pattern_box_group: null })
+    setForm({ name: '', demand_days: 0, color: PALETTE[0], pattern_box_group: null, text_avatar: '' })
     onRefresh()
   }
 
@@ -40,13 +41,13 @@ export default function ProjectsPage({ projects, onRefresh }: Props) {
 
   function startEdit(p: Project) {
     setEditing(p)
-    setForm({ name: p.name, demand_days: p.demand_days, color: p.color, pattern_box_group: p.pattern_box_group })
+    setForm({ name: p.name, demand_days: p.demand_days, color: p.color, pattern_box_group: p.pattern_box_group, text_avatar: p.text_avatar ?? '' })
     setAdding(false)
   }
 
   function startAdd() {
     setEditing(null)
-    setForm({ name: '', demand_days: 0, color: PALETTE[projects.length % PALETTE.length], pattern_box_group: null })
+    setForm({ name: '', demand_days: 0, color: PALETTE[projects.length % PALETTE.length], pattern_box_group: null, text_avatar: '' })
     setAdding(true)
   }
 
@@ -119,6 +120,16 @@ export default function ProjectsPage({ projects, onRefresh }: Props) {
                 onChange={e => setForm(f => ({ ...f, pattern_box_group: e.target.value === '' ? null : Number(e.target.value) }))}
               />
             </div>
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">Avatar text</label>
+              <input
+                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                placeholder="e.g. PR"
+                maxLength={4}
+                value={form.text_avatar}
+                onChange={e => setForm(f => ({ ...f, text_avatar: e.target.value }))}
+              />
+            </div>
           </div>
           <div className="mb-3">
             <label className="block text-xs text-gray-500 mb-2">Color</label>
@@ -180,7 +191,7 @@ export default function ProjectsPage({ projects, onRefresh }: Props) {
                       className="w-9 h-9 rounded-full flex-shrink-0 flex items-center justify-center text-white text-xs font-bold select-none"
                       style={{ backgroundColor: p.color }}
                     >
-                      {projectInitials(p.name)}
+                      {p.text_avatar || projectInitials(p.name)}
                     </span>
                     <span className="font-medium text-gray-800">{p.name}</span>
                   </div>

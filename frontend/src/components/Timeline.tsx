@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
-import type { Person, Project } from '../types'
+import type { Person, Project, Plant } from '../types'
 import { getAssignments, bulkAssign, bulkDelete, getNotes, upsertNote } from '../api'
 import {
   isoDate, daysInRange, isWeekend, italianHolidays,
@@ -38,6 +38,7 @@ function currentQuarterIndex(): number {
 interface Props {
   people: Person[]
   projects: Project[]
+  plants: Plant[]
   rangeStart: Date
   rangeEnd: Date
 }
@@ -49,9 +50,6 @@ interface DragState {
   projectId: number | null
 }
 
-const NOTE_TAGS = ['LF-R', 'LF-F', 'SF', 'MF', 'None'] as const
-type NoteTag = typeof NOTE_TAGS[number]
-
 const NOTE_SUGGESTIONS = ['Support', 'Team Coord', 'Courses'] as const
 
 interface NoteDialog {
@@ -59,7 +57,8 @@ interface NoteDialog {
   personName: string
   date: string
   text: string
-  tag: NoteTag
+  plant: string       // plant name, '' = none
+  valueStream: string // value_stream, '' = none
   showSuggestions: boolean
 }
 
@@ -85,11 +84,12 @@ function sprintLabel(days: Date[]): string {
   return `${fmt(from, true)} – ${fmt(to, !sameMonth)}`
 }
 
-export default function Timeline({ people, projects, rangeStart, rangeEnd }: Props) {
+export default function Timeline({ people, projects, plants, rangeStart, rangeEnd }: Props) {
   const [cellW, setCellW] = useState(CELL_W_DEFAULT)
   const [assignments, setAssignments] = useState<Map<string, number>>(new Map())
   const [cellNotes, setCellNotes] = useState<Map<string, string>>(new Map())
-  const [cellTags, setCellTags] = useState<Map<string, string>>(new Map())
+  const [cellPlants, setCellPlants] = useState<Map<string, string>>(new Map())
+  const [cellValueStreams, setCellValueStreams] = useState<Map<string, string>>(new Map())
   const [noteDialog, setNoteDialog] = useState<NoteDialog | null>(null)
   const [drag, setDrag] = useState<DragState | null>(null)
   const [pendingErase, setPendingErase] = useState<DragState | null>(null)
@@ -104,6 +104,7 @@ export default function Timeline({ people, projects, rangeStart, rangeEnd }: Pro
   const [sprintIndex, setSprintIndex] = useState(0)
 
   const scrollRef = useRef<HTMLDivElement>(null)
+  const didInitialScroll = useRef(false)
   const projectMap = new Map(projects.map(p => [p.id, p]))
   const todayStr = isoDate(new Date())
   const year = rangeStart.getFullYear()
@@ -119,14 +120,18 @@ export default function Timeline({ people, projects, rangeStart, rangeEnd }: Pro
       const aMap = new Map<string, number>()
       data.forEach(a => aMap.set(`${a.person_id}:${a.date}`, a.project_id))
       const nMap = new Map<string, string>()
-      const tMap = new Map<string, string>()
+      const pMap = new Map<string, string>()
+      const vMap = new Map<string, string>()
       notes.forEach(n => {
-        nMap.set(`${n.person_id}:${n.date}`, n.note)
-        if (n.tag) tMap.set(`${n.person_id}:${n.date}`, n.tag)
+        const key = `${n.person_id}:${n.date}`
+        nMap.set(key, n.note)
+        if (n.plant) pMap.set(key, n.plant)
+        if (n.value_stream) vMap.set(key, n.value_stream)
       })
       setAssignments(aMap)
       setCellNotes(nMap)
-      setCellTags(tMap)
+      setCellPlants(pMap)
+      setCellValueStreams(vMap)
     } finally {
       setLoading(false)
     }
@@ -174,15 +179,16 @@ export default function Timeline({ people, projects, rangeStart, rangeEnd }: Pro
     return Math.min(Math.floor(diff / SPRINT_DAYS), totalSprints - 1)
   }
 
-  // Scroll to start of current sprint on mount
+  // Scroll to start of current sprint once data is loaded
   useEffect(() => {
-    if (!scrollRef.current) return
+    if (loading || didInitialScroll.current || !scrollRef.current) return
+    didInitialScroll.current = true
     const idx = todaySprintIndex()
     const sprintStart = new Date(sprintAnchor)
     sprintStart.setDate(sprintAnchor.getDate() + idx * SPRINT_DAYS)
     const offset = Math.floor((sprintStart.getTime() - rangeStart.getTime()) / 86_400_000)
     scrollRef.current.scrollLeft = offset * cellW
-  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [loading]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Visible days ────────────────────────────────────────────────────────────
   const days =
@@ -219,7 +225,8 @@ export default function Timeline({ people, projects, rangeStart, rangeEnd }: Pro
         await fetch(`/api/notes?person_id=${d.personId}&date_from=${sorted[0]}&date_to=${sorted[sorted.length - 1]}`, { method: 'DELETE' })
       }
       setCellNotes(m => { const n = new Map(m); dates.forEach(date => n.delete(`${d.personId}:${date}`)); return n })
-      setCellTags(m => { const n = new Map(m); dates.forEach(date => n.delete(`${d.personId}:${date}`)); return n })
+      setCellPlants(m => { const n = new Map(m); dates.forEach(date => n.delete(`${d.personId}:${date}`)); return n })
+      setCellValueStreams(m => { const n = new Map(m); dates.forEach(date => n.delete(`${d.personId}:${date}`)); return n })
     } else {
       await bulkAssign(d.personId, d.projectId, dates)
     }
@@ -263,7 +270,8 @@ export default function Timeline({ people, projects, rangeStart, rangeEnd }: Pro
       personName: person.name,
       date,
       text: cellNotes.get(key) ?? '',
-      tag: (cellTags.get(key) as NoteTag) ?? 'None',
+      plant: cellPlants.get(key) ?? '',
+      valueStream: cellValueStreams.get(key) ?? '',
       showSuggestions,
     })
   }
@@ -275,12 +283,12 @@ export default function Timeline({ people, projects, rangeStart, rangeEnd }: Pro
 
   async function saveNote() {
     if (!noteDialog) return
-    const { personId, date, text, tag } = noteDialog
+    const { personId, date, text, plant, valueStream } = noteDialog
     const key = `${personId}:${date}`
-    const tagVal = tag === 'None' ? null : tag
-    await upsertNote(personId, date, text, tagVal)
+    await upsertNote(personId, date, text, plant || null, valueStream || null)
     setCellNotes(m => { const n = new Map(m); text.trim() ? n.set(key, text) : n.delete(key); return n })
-    setCellTags(m => { const n = new Map(m); tagVal ? n.set(key, tagVal) : n.delete(key); return n })
+    setCellPlants(m => { const n = new Map(m); plant ? n.set(key, plant) : n.delete(key); return n })
+    setCellValueStreams(m => { const n = new Map(m); valueStream ? n.set(key, valueStream) : n.delete(key); return n })
     setNoteDialog(null)
     setPendingErase(null)
   }
@@ -345,31 +353,20 @@ export default function Timeline({ people, projects, rangeStart, rangeEnd }: Pro
     const workingDays = days.filter(d => !isWeekend(d) && !holidays.has(isoDate(d)))
 
     // Collect all entries that have a note or tag
-    const entries: { tag: string; person: string; date: string; project: string; note: string }[] = []
+    const rows: string[][] = [['Person', 'Plant', 'Value Stream', 'Date', 'Project', 'Note']]
     people.forEach(person => {
       workingDays.forEach(d => {
         const key = `${person.id}:${isoDate(d)}`
         const note = cellNotes.get(key) ?? ''
-        const tag = cellTags.get(key) ?? ''
-        if (!note && !tag) return
+        const plant = cellPlants.get(key) ?? ''
+        const valueStream = cellValueStreams.get(key) ?? ''
+        if (!note && !plant && !valueStream) return
         const projId = assignments.get(key)
         const project = projId ? (projectMap.get(projId)?.name ?? '') : ''
         if (project.toLowerCase().includes('non-project')) return
         const dateLabel = `${d.toLocaleDateString('en-US', { weekday: 'long' })} ${isoDate(d)}`
-        entries.push({ tag: tag || '—', person: person.name, date: dateLabel, project, note })
+        rows.push([person.name, plant, valueStream, dateLabel, project, note])
       })
-    })
-
-    // Group by tag in NOTE_TAGS order, then untagged (—)
-    const tagOrder = [...NOTE_TAGS.filter(t => t !== 'None'), '—']
-    const rows: string[][] = []
-    tagOrder.forEach(tag => {
-      const group = entries.filter(e => e.tag === tag)
-      if (group.length === 0) return
-      rows.push([tag])
-      rows.push(['Person', 'Date', 'Project', 'Note'])
-      group.forEach(e => rows.push([e.person, e.date, e.project, e.note]))
-      rows.push([])
     })
 
     const csv = '﻿' + rows.map(r => r.map(c => `"${c.replace(/"/g, '""')}"`).join(',')).join('\n')
@@ -582,11 +579,11 @@ export default function Timeline({ people, projects, rangeStart, rangeEnd }: Pro
                     key={dateStr}
                     style={{
                       width: cellW, minWidth: cellW,
-                      borderLeft:  isToday ? undefined : qStart ? '2px solid #7c3aed' : undefined,
-                      borderRight: qEnd ? '2px solid #7c3aed' : undefined,
+                      borderLeft:  qStart && !isToday ? '2px solid #7c3aed' : undefined,
+                      borderRight: isToday ? '2px solid #60a5fa' : qEnd ? '2px solid #7c3aed' : undefined,
                     }}
                     className={`border-b border-r text-center ${
-                      isToday   ? 'border-l-2 border-l-blue-400 bg-blue-50'
+                      isToday   ? 'bg-blue-50'
                       : holiday ? 'border-gray-200 bg-red-100'
                       : wknd    ? 'border-gray-200 bg-gray-100'
                                 : 'border-gray-200 bg-white'
@@ -631,12 +628,12 @@ export default function Timeline({ people, projects, rangeStart, rangeEnd }: Pro
                         backgroundColor: proj ? proj.color : holiday ? '#fef2f2' : undefined,
                         cursor: ((wknd || holiday) && activeProject !== null) ? 'not-allowed' : (activeProject !== null ? 'crosshair' : 'cell'),
                         opacity: proj ? 0.85 : 1,
-                        borderLeft:  isToday ? undefined : qStart ? '2px solid #7c3aed' : undefined,
-                        borderRight: qEnd ? '2px solid #7c3aed' : undefined,
+                        borderLeft:  qStart && !isToday ? '2px solid #7c3aed' : undefined,
+                        borderRight: isToday ? '2px solid #60a5fa' : qEnd ? '2px solid #7c3aed' : undefined,
                       }}
                       className={`border-b border-r border-gray-100 ${
                         isToday
-                          ? 'border-l-2 border-l-blue-400' + (!proj ? ' bg-blue-50/40' : '')
+                          ? (!proj ? ' bg-blue-50/40' : '')
                           : (!proj && wknd ? 'bg-gray-100' : '')
                       }`}
                       onMouseDown={((wknd || holiday) && activeProject !== null) ? undefined : () => onCellMouseDown(person.id, dateStr)}
@@ -645,14 +642,15 @@ export default function Timeline({ people, projects, rangeStart, rangeEnd }: Pro
                       title={(() => {
                         const key = `${person.id}:${dateStr}`
                         const note = cellNotes.get(key)
-                        const tag = cellTags.get(key)
-                        const parts = [person.name, proj?.name, tag, note].filter(Boolean)
+                        const plant = cellPlants.get(key)
+                        const vs = cellValueStreams.get(key)
+                        const parts = [person.name, proj?.name, plant, vs, note].filter(Boolean)
                         return parts.length ? parts.join(' | ') : holiday ? `${dateStr} – festività` : dateStr
                       })()}
                     >
                       {proj && (
                         <span className="flex items-center justify-center h-full text-white font-bold select-none pointer-events-none" style={{ fontSize: 8, lineHeight: 1 }}>
-                          {projectInitials(proj.name)}
+                          {proj.text_avatar || projectInitials(proj.name)}
                         </span>
                       )}
                       {cellNotes.has(`${person.id}:${dateStr}`) && (
@@ -660,20 +658,22 @@ export default function Timeline({ people, projects, rangeStart, rangeEnd }: Pro
                           <polygon points="6,0 0,0 6,6" fill="white" />
                         </svg>
                       )}
-                      {cellTags.has(`${person.id}:${dateStr}`) && (
-                        <span
-                          className="absolute bottom-0 left-0 pointer-events-none leading-none font-semibold"
-                          style={{
-                            fontSize: 7,
-                            padding: '1px 2px',
-                            background: proj ? 'rgba(255,255,255,0.30)' : 'rgba(99,102,241,0.15)',
-                            color: proj ? 'rgba(255,255,255,0.95)' : '#4338ca',
-                            borderTopRightRadius: 3,
-                          }}
-                        >
-                          {cellTags.get(`${person.id}:${dateStr}`)}
-                        </span>
-                      )}
+                      {(cellPlants.has(`${person.id}:${dateStr}`) || cellValueStreams.has(`${person.id}:${dateStr}`)) && (() => {
+                        const plant = cellPlants.get(`${person.id}:${dateStr}`) ?? ''
+                        const vs = cellValueStreams.get(`${person.id}:${dateStr}`) ?? ''
+                        const style = {
+                          fontSize: 7,
+                          padding: '1px 2px',
+                          background: proj ? 'rgba(255,255,255,0.30)' : 'rgba(99,102,241,0.15)',
+                          color: proj ? 'rgba(255,255,255,0.95)' : '#4338ca',
+                        } as const
+                        return (
+                          <>
+                            {plant && <span className="absolute bottom-0 left-0 pointer-events-none leading-none font-semibold" style={{ ...style, borderTopRightRadius: 3 }}>{plant}</span>}
+                            {vs    && <span className="absolute bottom-0 right-0 pointer-events-none leading-none font-semibold" style={{ ...style, borderTopLeftRadius: 3 }}>{vs}</span>}
+                          </>
+                        )
+                      })()}
                     </td>
                   )
                 })}
@@ -731,21 +731,46 @@ export default function Timeline({ people, projects, rangeStart, rangeEnd }: Pro
           <div className="bg-white rounded-xl shadow-xl p-5 w-72">
             <p className="text-sm font-semibold text-gray-800">{noteDialog.personName}</p>
             <p className="text-xs text-gray-400 mb-3">{noteDialog.date}</p>
-            <div className="flex gap-1 mb-3">
-              {NOTE_TAGS.map(t => (
-                <button
-                  key={t}
-                  onClick={() => setNoteDialog(d => d ? { ...d, tag: t } : d)}
-                  className={`flex-1 py-1 rounded-md text-xs font-medium border transition-colors ${
-                    noteDialog.tag === t
-                      ? 'bg-indigo-600 text-white border-indigo-600'
-                      : 'bg-white text-gray-600 border-gray-300 hover:border-indigo-400 hover:text-indigo-600'
-                  }`}
-                >
-                  {t}
-                </button>
-              ))}
+            {/* Step 1 — Plant */}
+            <div className="mb-2">
+              <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-1">Plant</p>
+              <div className="flex flex-wrap gap-1">
+                {['', ...Array.from(new Set(plants.map(p => p.name)))].map(name => (
+                  <button
+                    key={name || '__none__'}
+                    onClick={() => setNoteDialog(d => d ? { ...d, plant: name, valueStream: '' } : d)}
+                    className={`px-2.5 py-1 rounded-md text-xs font-medium border transition-colors ${
+                      noteDialog.plant === name
+                        ? 'bg-indigo-600 text-white border-indigo-600'
+                        : 'bg-white text-gray-600 border-gray-300 hover:border-indigo-400 hover:text-indigo-600'
+                    }`}
+                  >
+                    {name || 'None'}
+                  </button>
+                ))}
+              </div>
             </div>
+            {/* Step 2 — Value stream (filtered by selected plant) */}
+            {noteDialog.plant && (
+              <div className="mb-3">
+                <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-1">Value stream</p>
+                <div className="flex flex-wrap gap-1">
+                  {Array.from(new Set(plants.filter(p => p.name === noteDialog.plant).map(p => p.value_stream))).map(vs => (
+                    <button
+                      key={vs}
+                      onClick={() => setNoteDialog(d => d ? { ...d, valueStream: vs } : d)}
+                      className={`px-2.5 py-1 rounded-md text-xs font-medium border transition-colors ${
+                        noteDialog.valueStream === vs
+                          ? 'bg-violet-600 text-white border-violet-600'
+                          : 'bg-white text-gray-600 border-gray-300 hover:border-violet-400 hover:text-violet-600'
+                      }`}
+                    >
+                      {vs}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
             {noteDialog.showSuggestions && !noteDialog.text && (
               <div className="flex gap-1.5 mb-2">
                 {NOTE_SUGGESTIONS.map(s => (

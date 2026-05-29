@@ -18,6 +18,13 @@ export interface Project {
   demand_days: number
   color: string
   pattern_box_group: number | null
+  text_avatar: string | null
+}
+
+export interface Plant {
+  id: number
+  name: string
+  value_stream: string
 }
 
 export interface Assignment {

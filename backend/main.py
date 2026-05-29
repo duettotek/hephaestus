@@ -1,5 +1,6 @@
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, func
 from pydantic import BaseModel
@@ -7,6 +8,7 @@ from typing import Optional
 from datetime import date
 import models
 from database import engine, get_db, Base
+from auth import get_current_user, hash_password, verify_password, create_access_token
 
 Base.metadata.create_all(bind=engine)
 
@@ -22,6 +24,11 @@ with engine.connect() as _conn:
             pass  # column already exists
     try:
         _conn.execute(text("ALTER TABLE projects ADD COLUMN pattern_box_group INTEGER"))
+        _conn.commit()
+    except Exception:
+        pass  # column already exists
+    try:
+        _conn.execute(text("ALTER TABLE projects ADD COLUMN text_avatar TEXT"))
         _conn.commit()
     except Exception:
         pass  # column already exists
@@ -49,6 +56,51 @@ with engine.connect() as _conn:
         _conn.commit()
     except Exception:
         pass
+    # Migrate tag → plant + value_stream
+    try:
+        _conn.execute(text("ALTER TABLE cell_notes ADD COLUMN plant TEXT"))
+        _conn.commit()
+    except Exception:
+        pass
+    try:
+        _conn.execute(text("ALTER TABLE cell_notes ADD COLUMN value_stream TEXT"))
+        _conn.commit()
+    except Exception:
+        pass
+    # Copy existing tag data into new columns
+    try:
+        rows = _conn.execute(text("SELECT id, tag FROM cell_notes WHERE tag IS NOT NULL AND plant IS NULL")).fetchall()
+        for row in rows:
+            tag = row[1]
+            if '/' in tag:
+                plant_val, vs_val = tag.split('/', 1)
+            else:
+                plant_val, vs_val = None, tag
+            _conn.execute(text("UPDATE cell_notes SET plant = :p, value_stream = :v WHERE id = :id"),
+                          {"p": plant_val, "v": vs_val, "id": row[0]})
+        _conn.commit()
+    except Exception:
+        pass
+
+# Seed plants table with initial data
+with engine.connect() as _conn:
+    count = _conn.execute(text("SELECT COUNT(*) FROM plants")).scalar()
+    if count == 0:
+        for _name, _vs in [("QDA", "LF-R")]:
+            _conn.execute(text(
+                "INSERT INTO plants (name, value_stream) VALUES (:n, :v)"
+            ), {"n": _name, "v": _vs})
+        _conn.commit()
+
+# Seed default admin user if no users exist yet
+from auth import hash_password as _hash
+with engine.connect() as _conn:
+    count = _conn.execute(text("SELECT COUNT(*) FROM users")).scalar()
+    if count == 0:
+        _conn.execute(text(
+            "INSERT INTO users (username, hashed_password, is_active) VALUES (:u, :p, 1)"
+        ), {"u": "admin", "p": _hash("admin")})
+        _conn.commit()
 
 app = FastAPI(title="Capacity Planner")
 
@@ -93,6 +145,7 @@ class ProjectCreate(BaseModel):
     demand_days: int = 0
     color: str = "#6366f1"
     pattern_box_group: Optional[int] = None
+    text_avatar: Optional[str] = None
 
 class ProjectOut(ProjectCreate):
     id: int
@@ -135,26 +188,148 @@ class CellNoteUpsert(BaseModel):
     person_id: int
     date: date
     note: str
-    tag: Optional[str] = None
+    plant: Optional[str] = None
+    value_stream: Optional[str] = None
 
 class CellNoteOut(BaseModel):
     person_id: int
     date: date
     note: str
-    tag: Optional[str] = None
+    plant: Optional[str] = None
+    value_stream: Optional[str] = None
     class Config:
         from_attributes = True
 
 
 
+# ── Plants ────────────────────────────────────────────────────────────────────
+
+class PlantCreate(BaseModel):
+    name: str
+    value_stream: str
+
+class PlantOut(PlantCreate):
+    id: int
+    class Config:
+        from_attributes = True
+
+
+# ── Auth ──────────────────────────────────────────────────────────────────────
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+class UserCreate(BaseModel):
+    username: str
+    password: str
+
+class AdminSetPasswordRequest(BaseModel):
+    new_password: str
+
+class UserOut(BaseModel):
+    id: int
+    username: str
+    is_active: bool
+    class Config:
+        from_attributes = True
+
+@app.post("/api/auth/login")
+def login(form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+    user = db.query(models.User).filter(models.User.username == form.username).first()
+    if not user or not verify_password(form.password, user.hashed_password):
+        raise HTTPException(status_code=401, detail="Incorrect username or password")
+    token = create_access_token({"sub": user.username})
+    return {"access_token": token, "token_type": "bearer"}
+
+@app.get("/api/auth/me")
+def me(current_user: models.User = Depends(get_current_user)):
+    return {"username": current_user.username}
+
+@app.put("/api/auth/password")
+def change_password(req: ChangePasswordRequest, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if not verify_password(req.current_password, current_user.hashed_password):
+        raise HTTPException(status_code=400, detail="Current password is incorrect")
+    current_user.hashed_password = hash_password(req.new_password)
+    db.commit()
+    return {"ok": True}
+
+@app.get("/api/users", response_model=list[UserOut])
+def list_users(db: Session = Depends(get_db), _: models.User = Depends(get_current_user)):
+    return db.query(models.User).order_by(models.User.id).all()
+
+@app.post("/api/users", response_model=UserOut)
+def create_user(req: UserCreate, db: Session = Depends(get_db), _: models.User = Depends(get_current_user)):
+    if db.query(models.User).filter(models.User.username == req.username).first():
+        raise HTTPException(status_code=400, detail="Username already exists")
+    user = models.User(username=req.username, hashed_password=hash_password(req.password))
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return user
+
+@app.put("/api/users/{user_id}/password")
+def admin_set_password(user_id: int, req: AdminSetPasswordRequest, db: Session = Depends(get_db), _: models.User = Depends(get_current_user)):
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    user.hashed_password = hash_password(req.new_password)
+    db.commit()
+    return {"ok": True}
+
+@app.delete("/api/users/{user_id}")
+def delete_user(user_id: int, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if current_user.id == user_id:
+        raise HTTPException(status_code=400, detail="Cannot delete your own account")
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    db.delete(user)
+    db.commit()
+    return {"ok": True}
+
+
+@app.get("/api/plants", response_model=list[PlantOut])
+def list_plants(db: Session = Depends(get_db), _: models.User = Depends(get_current_user)):
+    return db.query(models.Plant).order_by(models.Plant.name).all()
+
+@app.post("/api/plants", response_model=PlantOut)
+def create_plant(plant: PlantCreate, db: Session = Depends(get_db), _: models.User = Depends(get_current_user)):
+    db_plant = models.Plant(**plant.model_dump())
+    db.add(db_plant)
+    db.commit()
+    db.refresh(db_plant)
+    return db_plant
+
+@app.put("/api/plants/{plant_id}", response_model=PlantOut)
+def update_plant(plant_id: int, plant: PlantCreate, db: Session = Depends(get_db), _: models.User = Depends(get_current_user)):
+    db_plant = db.query(models.Plant).filter(models.Plant.id == plant_id).first()
+    if not db_plant:
+        raise HTTPException(status_code=404, detail="Plant not found")
+    for k, v in plant.model_dump().items():
+        setattr(db_plant, k, v)
+    db.commit()
+    db.refresh(db_plant)
+    return db_plant
+
+@app.delete("/api/plants/{plant_id}")
+def delete_plant(plant_id: int, db: Session = Depends(get_db), _: models.User = Depends(get_current_user)):
+    db_plant = db.query(models.Plant).filter(models.Plant.id == plant_id).first()
+    if not db_plant:
+        raise HTTPException(status_code=404, detail="Plant not found")
+    db.delete(db_plant)
+    db.commit()
+    return {"ok": True}
+
+
 # ── Roles ─────────────────────────────────────────────────────────────────────
 
 @app.get("/api/roles", response_model=list[RoleOut])
-def list_roles(db: Session = Depends(get_db)):
+def list_roles(db: Session = Depends(get_db), _: models.User = Depends(get_current_user)):
     return db.query(models.Role).all()
 
 @app.post("/api/roles", response_model=RoleOut)
-def create_role(role: RoleCreate, db: Session = Depends(get_db)):
+def create_role(role: RoleCreate, db: Session = Depends(get_db), _: models.User = Depends(get_current_user)):
     db_role = models.Role(**role.model_dump())
     db.add(db_role)
     db.commit()
@@ -162,7 +337,7 @@ def create_role(role: RoleCreate, db: Session = Depends(get_db)):
     return db_role
 
 @app.put("/api/roles/{role_id}", response_model=RoleOut)
-def update_role(role_id: int, role: RoleCreate, db: Session = Depends(get_db)):
+def update_role(role_id: int, role: RoleCreate, db: Session = Depends(get_db), _: models.User = Depends(get_current_user)):
     db_role = db.query(models.Role).filter(models.Role.id == role_id).first()
     if not db_role:
         raise HTTPException(status_code=404, detail="Role not found")
@@ -173,7 +348,7 @@ def update_role(role_id: int, role: RoleCreate, db: Session = Depends(get_db)):
     return db_role
 
 @app.delete("/api/roles/{role_id}")
-def delete_role(role_id: int, db: Session = Depends(get_db)):
+def delete_role(role_id: int, db: Session = Depends(get_db), _: models.User = Depends(get_current_user)):
     db_role = db.query(models.Role).filter(models.Role.id == role_id).first()
     if not db_role:
         raise HTTPException(status_code=404, detail="Role not found")
@@ -185,7 +360,7 @@ def delete_role(role_id: int, db: Session = Depends(get_db)):
 # ── People ────────────────────────────────────────────────────────────────────
 
 @app.get("/api/people", response_model=list[PersonOut])
-def list_people(db: Session = Depends(get_db)):
+def list_people(db: Session = Depends(get_db), _: models.User = Depends(get_current_user)):
     people = db.query(models.Person).order_by(models.Person.sort_order).all()
     return [
         PersonOut(
@@ -197,14 +372,14 @@ def list_people(db: Session = Depends(get_db)):
     ]
 
 @app.put("/api/people/reorder")
-def reorder_people(req: ReorderPeopleRequest, db: Session = Depends(get_db)):
+def reorder_people(req: ReorderPeopleRequest, db: Session = Depends(get_db), _: models.User = Depends(get_current_user)):
     for order, pid in enumerate(req.ids):
         db.query(models.Person).filter(models.Person.id == pid).update({"sort_order": order})
     db.commit()
     return {"ok": True}
 
 @app.post("/api/people", response_model=PersonOut)
-def create_person(person: PersonCreate, db: Session = Depends(get_db)):
+def create_person(person: PersonCreate, db: Session = Depends(get_db), _: models.User = Depends(get_current_user)):
     db_person = models.Person(**person.model_dump())
     db.add(db_person)
     db.commit()
@@ -216,7 +391,7 @@ def create_person(person: PersonCreate, db: Session = Depends(get_db)):
     )
 
 @app.put("/api/people/{person_id}", response_model=PersonOut)
-def update_person(person_id: int, person: PersonCreate, db: Session = Depends(get_db)):
+def update_person(person_id: int, person: PersonCreate, db: Session = Depends(get_db), _: models.User = Depends(get_current_user)):
     db_person = db.query(models.Person).filter(models.Person.id == person_id).first()
     if not db_person:
         raise HTTPException(status_code=404, detail="Person not found")
@@ -231,7 +406,7 @@ def update_person(person_id: int, person: PersonCreate, db: Session = Depends(ge
     )
 
 @app.delete("/api/people/{person_id}")
-def delete_person(person_id: int, db: Session = Depends(get_db)):
+def delete_person(person_id: int, db: Session = Depends(get_db), _: models.User = Depends(get_current_user)):
     db_person = db.query(models.Person).filter(models.Person.id == person_id).first()
     if not db_person:
         raise HTTPException(status_code=404, detail="Person not found")
@@ -243,18 +418,18 @@ def delete_person(person_id: int, db: Session = Depends(get_db)):
 # ── Projects ──────────────────────────────────────────────────────────────────
 
 @app.get("/api/projects", response_model=list[ProjectOut])
-def list_projects(db: Session = Depends(get_db)):
+def list_projects(db: Session = Depends(get_db), _: models.User = Depends(get_current_user)):
     return db.query(models.Project).order_by(models.Project.sort_order).all()
 
 @app.put("/api/projects/reorder")
-def reorder_projects(req: ReorderRequest, db: Session = Depends(get_db)):
+def reorder_projects(req: ReorderRequest, db: Session = Depends(get_db), _: models.User = Depends(get_current_user)):
     for order, pid in enumerate(req.ids):
         db.query(models.Project).filter(models.Project.id == pid).update({"sort_order": order})
     db.commit()
     return {"ok": True}
 
 @app.post("/api/projects", response_model=ProjectOut)
-def create_project(project: ProjectCreate, db: Session = Depends(get_db)):
+def create_project(project: ProjectCreate, db: Session = Depends(get_db), _: models.User = Depends(get_current_user)):
     db_proj = models.Project(**project.model_dump())
     db.add(db_proj)
     db.commit()
@@ -262,7 +437,7 @@ def create_project(project: ProjectCreate, db: Session = Depends(get_db)):
     return db_proj
 
 @app.put("/api/projects/{project_id}", response_model=ProjectOut)
-def update_project(project_id: int, project: ProjectCreate, db: Session = Depends(get_db)):
+def update_project(project_id: int, project: ProjectCreate, db: Session = Depends(get_db), _: models.User = Depends(get_current_user)):
     db_proj = db.query(models.Project).filter(models.Project.id == project_id).first()
     if not db_proj:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -273,7 +448,7 @@ def update_project(project_id: int, project: ProjectCreate, db: Session = Depend
     return db_proj
 
 @app.delete("/api/projects/{project_id}")
-def delete_project(project_id: int, db: Session = Depends(get_db)):
+def delete_project(project_id: int, db: Session = Depends(get_db), _: models.User = Depends(get_current_user)):
     db_proj = db.query(models.Project).filter(models.Project.id == project_id).first()
     if not db_proj:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -285,7 +460,7 @@ def delete_project(project_id: int, db: Session = Depends(get_db)):
 # ── Assignments ───────────────────────────────────────────────────────────────
 
 @app.get("/api/assignments")
-def list_assignments(date_from: date, date_to: date, db: Session = Depends(get_db)):
+def list_assignments(date_from: date, date_to: date, db: Session = Depends(get_db), _: models.User = Depends(get_current_user)):
     rows = db.query(models.Assignment).filter(
         and_(models.Assignment.date >= date_from, models.Assignment.date <= date_to)
     ).all()
@@ -295,7 +470,7 @@ def list_assignments(date_from: date, date_to: date, db: Session = Depends(get_d
     ]
 
 @app.post("/api/assignments/bulk")
-def bulk_assign(req: BulkAssignRequest, db: Session = Depends(get_db)):
+def bulk_assign(req: BulkAssignRequest, db: Session = Depends(get_db), _: models.User = Depends(get_current_user)):
     for d in req.dates:
         existing = db.query(models.Assignment).filter(
             and_(models.Assignment.person_id == req.person_id, models.Assignment.date == d)
@@ -308,7 +483,7 @@ def bulk_assign(req: BulkAssignRequest, db: Session = Depends(get_db)):
     return {"ok": True, "count": len(req.dates)}
 
 @app.delete("/api/assignments/bulk")
-def bulk_delete(req: BulkDeleteRequest, db: Session = Depends(get_db)):
+def bulk_delete(req: BulkDeleteRequest, db: Session = Depends(get_db), _: models.User = Depends(get_current_user)):
     for d in req.dates:
         db.query(models.Assignment).filter(
             and_(models.Assignment.person_id == req.person_id, models.Assignment.date == d)
@@ -317,7 +492,7 @@ def bulk_delete(req: BulkDeleteRequest, db: Session = Depends(get_db)):
     return {"ok": True}
 
 @app.put("/api/assignments/text")
-def update_assignment_text(req: AssignmentTextUpdate, db: Session = Depends(get_db)):
+def update_assignment_text(req: AssignmentTextUpdate, db: Session = Depends(get_db), _: models.User = Depends(get_current_user)):
     a = db.query(models.Assignment).filter(
         and_(models.Assignment.person_id == req.person_id, models.Assignment.date == req.date)
     ).first()
@@ -328,33 +503,35 @@ def update_assignment_text(req: AssignmentTextUpdate, db: Session = Depends(get_
     return {"ok": True}
 
 @app.get("/api/notes")
-def list_notes(date_from: date, date_to: date, db: Session = Depends(get_db)):
+def list_notes(date_from: date, date_to: date, db: Session = Depends(get_db), _: models.User = Depends(get_current_user)):
     rows = db.query(models.CellNote).filter(
         and_(models.CellNote.date >= date_from, models.CellNote.date <= date_to)
     ).all()
-    return [{"person_id": r.person_id, "date": r.date.isoformat(), "note": r.note, "tag": r.tag} for r in rows]
+    return [{"person_id": r.person_id, "date": r.date.isoformat(), "note": r.note, "plant": r.plant, "value_stream": r.value_stream} for r in rows]
 
 @app.put("/api/notes")
-def upsert_note(req: CellNoteUpsert, db: Session = Depends(get_db)):
+def upsert_note(req: CellNoteUpsert, db: Session = Depends(get_db), _: models.User = Depends(get_current_user)):
     existing = db.query(models.CellNote).filter(
         and_(models.CellNote.person_id == req.person_id, models.CellNote.date == req.date)
     ).first()
     note_text = req.note.strip()
-    tag_val = req.tag if req.tag and req.tag != "None" else None
-    has_content = bool(note_text) or tag_val is not None
+    plant_val = req.plant.strip() if req.plant else None
+    vs_val = req.value_stream.strip() if req.value_stream else None
+    has_content = bool(note_text) or plant_val or vs_val
     if existing:
         if has_content:
             existing.note = note_text
-            existing.tag = tag_val
+            existing.plant = plant_val
+            existing.value_stream = vs_val
         else:
             db.delete(existing)
     elif has_content:
-        db.add(models.CellNote(person_id=req.person_id, date=req.date, note=note_text, tag=tag_val))
+        db.add(models.CellNote(person_id=req.person_id, date=req.date, note=note_text, plant=plant_val, value_stream=vs_val))
     db.commit()
     return {"ok": True}
 
 @app.delete("/api/notes")
-def delete_notes_bulk(person_id: int, date_from: date, date_to: date, db: Session = Depends(get_db)):
+def delete_notes_bulk(person_id: int, date_from: date, date_to: date, db: Session = Depends(get_db), _: models.User = Depends(get_current_user)):
     db.query(models.CellNote).filter(
         and_(
             models.CellNote.person_id == person_id,
@@ -366,7 +543,7 @@ def delete_notes_bulk(person_id: int, date_from: date, date_to: date, db: Sessio
     return {"ok": True}
 
 @app.delete("/api/assignments/{assignment_id}")
-def delete_assignment(assignment_id: int, db: Session = Depends(get_db)):
+def delete_assignment(assignment_id: int, db: Session = Depends(get_db), _: models.User = Depends(get_current_user)):
     a = db.query(models.Assignment).filter(models.Assignment.id == assignment_id).first()
     if not a:
         raise HTTPException(status_code=404, detail="Assignment not found")
@@ -378,7 +555,7 @@ def delete_assignment(assignment_id: int, db: Session = Depends(get_db)):
 # ── Stats ─────────────────────────────────────────────────────────────────────
 
 @app.get("/api/stats")
-def get_stats(date_from: date, date_to: date, db: Session = Depends(get_db)):
+def get_stats(date_from: date, date_to: date, db: Session = Depends(get_db), _: models.User = Depends(get_current_user)):
     rows = (
         db.query(
             models.Assignment.person_id,
